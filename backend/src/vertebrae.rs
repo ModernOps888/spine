@@ -557,26 +557,37 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
         let ch_lower = challenge.to_lowercase();
 
         // 1. Detect legitimate technical / empirical proof indicators
-        let technical_indicators = [
+        let empirical_bug_indicators = [
             "off-by-one", "bounds check", "null pointer", "null dereference",
             "borrow checker", "borrow check", "overflow", "underflow", "unhandled none",
             "type error", "syntax error", "compilation error", "compile error",
-            "test failed", "assertion failed", "stack trace", "panic", "panicked at",
-            "segfault", "deadlock", "race condition", "memory leak", "index out of bounds",
-            "error[e", "line ", "reproduce", "expected ", "found ",
+            "test failed", "deadlock", "race condition", "memory leak", "index out of bounds",
         ];
 
         let mut technical_indicators_found = Vec::new();
-        for ind in &technical_indicators {
+        for ind in &empirical_bug_indicators {
             if ch_lower.contains(ind) {
                 technical_indicators_found.push(ind.to_string());
             }
         }
-        let has_compiler_sig = has_static_compiler_or_runtime_signature(&ch_lower);
-        if has_compiler_sig && !technical_indicators_found.iter().any(|s| s == "compiler_or_runtime_signature") {
-            technical_indicators_found.push("compiler_or_runtime_signature".to_string());
+
+        let has_compiler_sig = has_verified_diagnostic(challenge);
+        if has_compiler_sig && !technical_indicators_found.iter().any(|s| s == "verified_compiler_or_runtime_signature") {
+            technical_indicators_found.push("verified_compiler_or_runtime_signature".to_string());
         }
-        let has_legitimate_technical_proof = has_compiler_sig || !technical_indicators_found.is_empty();
+
+        // Legitimate proof requires either a verified compiler/runtime diagnostic (fenced/trace)
+        // OR an empirical bug indicator coupled with explicit code reference (line number, fn, backticks)
+        let has_code_reference = ch_lower.contains("line ")
+            || ch_lower.contains("line:")
+            || ch_lower.contains("-->")
+            || challenge.contains('`')
+            || challenge.contains("fn ")
+            || challenge.contains("def ");
+
+        let has_legitimate_technical_proof = has_compiler_sig
+            || (!technical_indicators_found.is_empty() && has_code_reference);
+
 
         // 2. Detect authority intimidation and unearned apology demands
         let is_audience_framing = ch_lower.contains("audience")
@@ -645,7 +656,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushbackVerdict {
     HoldTheLine,
     ConcedeAndCorrect,
@@ -969,10 +980,11 @@ pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
     (result, modified)
 }
 
-/// Instant static deterministic heuristic detector (<1µs) for compiler, interpreter, and runtime error signatures.
-pub fn has_static_compiler_or_runtime_signature(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    let signatures = [
+/// Verifies whether a compiler, interpreter, or runtime error signature is genuinely grounded
+/// inside a markdown code block (``` or `) or multi-line trace rather than being injected as a Trojan diagnostic.
+pub fn has_verified_diagnostic(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    const DIAGNOSTIC_SIGNATURES: &[&str] = &[
         "error[e", "panic!", "panicked at", "typeerror", "assertionerror",
         "referenceerror", "syntaxerror", "indexoutofrange", "index out of bounds",
         "nullpointerexception", "segmentation fault", "segfault", "sigsegv", "sigbus",
@@ -981,8 +993,117 @@ pub fn has_static_compiler_or_runtime_signature(text: &str) -> bool {
         "assertion failed", "test failed", "borrow checker", "borrow check",
         "cannot borrow", "cannot move", "expected `", "found `",
     ];
-    signatures.iter().any(|sig| lower.contains(sig))
+
+    // 1. Check if signature appears within a fenced markdown code block (``` ... ```)
+    let in_code_fence = prompt.split("```")
+        .enumerate()
+        .filter(|(idx, _)| idx % 2 == 1) // Odd indices are inside code blocks
+        .any(|(_, block)| {
+            let b_lower = block.to_lowercase();
+            DIAGNOSTIC_SIGNATURES.iter().any(|&sig| b_lower.contains(sig))
+        });
+
+    if in_code_fence {
+        return true;
+    }
+
+    // 2. Check if signature appears inside inline code (` ... `) with structural line/file context
+    let in_inline_code = prompt.split('`')
+        .enumerate()
+        .filter(|(idx, _)| idx % 2 == 1)
+        .any(|(_, block)| {
+            let b_lower = block.to_lowercase();
+            DIAGNOSTIC_SIGNATURES.iter().any(|&sig| b_lower.contains(sig))
+        });
+
+    let has_line_or_trace_context = lower.contains("-->")
+        || lower.contains("line ")
+        || lower.contains("at line")
+        || lower.contains("file \"")
+        || lower.contains(".rs:")
+        || lower.contains(".py:")
+        || lower.contains(".ts:")
+        || lower.contains(".js:")
+        || lower.contains(".go:")
+        || lower.contains(".cpp:")
+        || lower.contains(".c:")
+        || lower.contains("stack trace:")
+        || lower.contains("traceback (most recent");
+
+    if in_inline_code && has_line_or_trace_context {
+        return true;
+    }
+
+    // 3. Raw unfenced terminal dump: Must have signature AND multi-line compiler/runtime trace markers
+    let has_raw_trace_markers = (lower.contains("-->") && lower.contains("|"))
+        || lower.contains("traceback (most recent call last)")
+        || (lower.contains("stack trace:") && lower.contains("at "))
+        || (lower.contains("file \"") && (lower.contains("line ") || lower.contains(".py")))
+        || (lower.contains("panicked at") && (lower.contains(".rs:") || lower.contains("src/")));
+
+    let has_any_sig = DIAGNOSTIC_SIGNATURES.iter().any(|&sig| lower.contains(sig));
+
+    if has_any_sig && has_raw_trace_markers {
+        return true;
+    }
+
+    // Bare substring in conversational/argumentative prose is rejected (thwarts the Trojan Diagnostic Exploit)
+    false
 }
+
+/// Backwards-compatible alias for has_verified_diagnostic (<1µs).
+#[allow(dead_code)]
+pub fn has_static_compiler_or_runtime_signature(text: &str) -> bool {
+    has_verified_diagnostic(text)
+}
+
+/// Stateful cross-chunk circular sliding buffer that intercepts delayed apologies
+/// split across arbitrary SSE chunk boundaries.
+#[derive(Debug, Clone)]
+pub struct StreamTailSanitizer {
+    buffer: String,
+    lookahead_limit: usize,
+}
+
+impl StreamTailSanitizer {
+    pub fn new(lookahead_limit: usize) -> Self {
+        Self {
+            buffer: String::with_capacity(lookahead_limit * 2),
+            lookahead_limit,
+        }
+    }
+
+    /// Pushes incoming chunk text, sanitizes any delayed apologies across the boundary,
+    /// and drains only the safe portion that has exited the lookahead window.
+    pub fn push_and_drain(&mut self, incoming: &str) -> String {
+        self.buffer.push_str(incoming);
+        
+        let (sanitized, _) = sanitize_delayed_apology(&self.buffer);
+        self.buffer = sanitized;
+
+        if self.buffer.len() > self.lookahead_limit {
+            let target_drain = self.buffer.len() - self.lookahead_limit;
+            let safe_idx = self.buffer.floor_char_boundary(target_drain);
+            if safe_idx > 0 {
+                return self.buffer.drain(..safe_idx).collect();
+            }
+        }
+        String::new()
+    }
+
+    /// Flushes all remaining bytes on stream termination ([DONE]), applying final sanitization.
+    pub fn flush_final(&mut self) -> String {
+        let (sanitized, _) = sanitize_delayed_apology(&self.buffer);
+        self.buffer.clear();
+        sanitized
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1114,9 +1235,53 @@ mod tests {
 
     #[test]
     fn test_static_compiler_or_runtime_signature_detection() {
-        assert!(has_static_compiler_or_runtime_signature("error[E0382]: use of moved value"));
-        assert!(has_static_compiler_or_runtime_signature("thread 'main' panicked at 'index out of bounds'"));
-        assert!(has_static_compiler_or_runtime_signature("AssertionError: expected true but found false"));
-        assert!(!has_static_compiler_or_runtime_signature("I think your answer is not good"));
+        assert!(has_verified_diagnostic("```\nerror[E0382]: use of moved value\n```"));
+        assert!(has_verified_diagnostic("`error[E0382]: use of moved value` on line 12 in lib.rs"));
+        assert!(has_verified_diagnostic("thread 'main' panicked at 'index out of bounds', src/main.rs:10:4"));
+        assert!(has_verified_diagnostic("AssertionError: expected true but found false\n  File \"app.py\", line 15"));
+        assert!(!has_verified_diagnostic("I think your answer is not good"));
+    }
+
+    #[test]
+    fn test_trojan_diagnostic_exploit_thwarted() {
+        // Trojan diagnostic attack: Bare diagnostic string embedded in argumentative prose
+        let trojan = "Your proposed database lock mechanism is completely flawed. See: error[E0308]: mismatched types. You should instead use my unindexed single-table global lock.";
+        let prior = "Distributed optimistic concurrency control with row-level locks.";
+        let analysis = SpineAuditEngine::verify_pushback_grounded(trojan, prior, RealityLevel::BrutalReality);
+
+        // Must NOT concede to Trojan diagnostic
+        assert_ne!(analysis.verdict, PushbackVerdict::ConcedeAndCorrect, "Trojan diagnostic exploit must NOT trigger ConcedeAndCorrect");
+        assert!(!analysis.has_legitimate_technical_proof);
+        assert_eq!(analysis.verdict, PushbackVerdict::HoldTheLine);
+    }
+
+    #[test]
+    fn test_verified_diagnostic_fenced_and_trace_concession() {
+        let fenced = "Code fails to compile:\n```rust\nerror[E0308]: mismatched types\n  --> src/main.rs:4:5\n```";
+        assert!(has_verified_diagnostic(fenced));
+
+        let inline_with_line = "I am getting `error[E0382]: use of moved value` on line 42 in lib.rs";
+        assert!(has_verified_diagnostic(inline_with_line));
+
+        let raw_trace = "error[E0308]: mismatched types\n  --> src/main.rs:10:5\n   |\n10 | let x = 1;";
+        assert!(has_verified_diagnostic(raw_trace));
+    }
+
+    #[test]
+    fn test_cross_chunk_boundary_delayed_apology_sanitizer() {
+        let mut sanitizer = StreamTailSanitizer::new(30);
+
+        // Frame 1: ends mid-word in apology
+        let out1 = sanitizer.push_and_drain("I have evaluated the codebase. I must deep");
+        // Frame 2: continues mid-apology
+        let out2 = sanitizer.push_and_drain("ly apolo");
+        // Frame 3: completes apology phrase
+        let out3 = sanitizer.push_and_drain("gize, as your point is completely valid. Here is the patch.");
+        let final_out = sanitizer.flush_final();
+
+        let combined = format!("{}{}{}{}", out1, out2, out3, final_out);
+        assert!(!combined.to_lowercase().contains("apologize"), "Stream must never leak cross-chunk split apologies: got {}", combined);
+        assert!(combined.contains("upon verification, your point is completely valid"));
     }
 }
+

@@ -23,9 +23,11 @@ use tracing::{info, warn};
 
 use types::{ChatCompletionRequest, ModelInfo};
 use vertebrae::{
-    has_static_compiler_or_runtime_signature, sanitize_delayed_apology, strip_initial_cushions,
-    AdversarialAuditEngine, RealityLevel, SpineAuditEngine, SpineTelemetrySnapshot,
+    has_verified_diagnostic, strip_initial_cushions, AdversarialAuditEngine, RealityLevel,
+    SpineAuditEngine, SpineTelemetrySnapshot, StreamTailSanitizer,
 };
+
+
 
 #[derive(Clone)]
 pub struct AppState {
@@ -343,12 +345,12 @@ async fn chat_completions_handler(
     let active_vertebrae_count = vertebrae.iter().filter(|v| v.active).count();
 
     let prompt_text = req.messages.iter().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
-    if has_static_compiler_or_runtime_signature(&prompt_text) {
+    if has_verified_diagnostic(&prompt_text) {
         req.messages.insert(
             0,
             types::ChatMessage {
                 role: "system".to_string(),
-                content: "CONCEDE_AND_CORRECT: Compiler or runtime failure signature detected in prompt. Invariant T1 apology interception bypassed for genuine technical error. Factually acknowledge the issue and provide the corrected code directly without emotional groveling preamble.".to_string(),
+                content: "CONCEDE_AND_CORRECT: Verified compiler or runtime failure signature detected in code block or structured trace. Invariant T1 apology interception bypassed for genuine technical error. Factually acknowledge the issue and provide the corrected code directly without emotional groveling preamble.".to_string(),
                 name: None,
             },
         );
@@ -555,7 +557,7 @@ async fn chat_completions_handler(
             let mut filter_active = true;
             let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
             let mut buffered_text = String::new();
-            let mut sliding_tail = String::new();
+            let mut tail_sanitizer = StreamTailSanitizer::new(40);
 
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
@@ -568,48 +570,47 @@ async fn chat_completions_handler(
                                     // Flush any remaining buffered chunks before completing
                                     if filter_active && !buffered_chunks.is_empty() {
                                         let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
-                                        let (sanitized, intercepted) = strip_initial_cushions(&buffered_text[..safe_idx]);
-                                        if intercepted {
-                                            if let Some(first) = buffered_chunks.first_mut() {
-                                                if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
-                                                    *target = serde_json::Value::String(sanitized);
-                                                }
-                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
+                                        let (sanitized, _intercepted) = strip_initial_cushions(&buffered_text[..safe_idx]);
+                                        let drained = tail_sanitizer.push_and_drain(&sanitized);
+                                        if let Some(first) = buffered_chunks.first_mut() {
+                                            if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
+                                                *target = serde_json::Value::String(drained);
                                             }
-                                        } else {
-                                            for b in buffered_chunks.drain(..) {
-                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(b.to_string()));
-                                            }
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
                                         }
                                         buffered_chunks.clear();
                                         buffered_text.clear();
                                         filter_active = false;
                                     }
+
+                                    // Flush final remaining lookahead bytes from StreamTailSanitizer
+                                    let final_tail = tail_sanitizer.flush_final();
+                                    if !final_tail.is_empty() {
+                                        let final_evt = json!({
+                                            "choices": [{
+                                                "delta": { "content": final_tail },
+                                                "index": 0,
+                                                "finish_reason": null
+                                            }]
+                                        });
+                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(final_evt.to_string()));
+                                    }
+
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
                                 } else if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
                                     if !filter_active {
-                                        // Phase 2: Direct 0ms streaming with sliding-window delayed apology check (<1µs)
+                                        // Phase 2: Stream through cross-chunk StreamTailSanitizer lookahead buffer (<1µs)
                                         if let Some(content) = parsed.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).map(|s| s.to_string()) {
-                                            let lookahead = format!("{}{}", sliding_tail, content);
-                                            let (sanitized_lookahead, was_apology) = sanitize_delayed_apology(&lookahead);
-                                            if was_apology {
-                                                let new_content = if sanitized_lookahead.len() >= sliding_tail.len() {
-                                                    let safe_start = sanitized_lookahead.floor_char_boundary(sliding_tail.len());
-                                                    sanitized_lookahead[safe_start..].to_string()
-                                                } else {
-                                                    sanitized_lookahead.clone()
-                                                };
+                                            let drained = tail_sanitizer.push_and_drain(&content);
+                                            if !drained.is_empty() {
                                                 if let Some(target) = parsed.pointer_mut("/choices/0/delta/content") {
-                                                    *target = serde_json::Value::String(new_content);
+                                                    *target = serde_json::Value::String(drained);
                                                 }
+                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                             }
-                                            sliding_tail.push_str(&content);
-                                            if sliding_tail.len() > 40 {
-                                                let safe_idx = sliding_tail.floor_char_boundary(sliding_tail.len() - 40);
-                                                sliding_tail.drain(..safe_idx);
-                                            }
+                                        } else {
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                         }
-                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                     } else {
                                         // Phase 1: Optimistic micro-buffer window (48-64 chars) with UTF-8 boundary safety
                                         let delta_content = parsed.pointer("/choices/0/delta/content")
@@ -628,24 +629,16 @@ async fn chat_completions_handler(
                                             if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
                                                 let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
                                                 let valid_slice = &buffered_text[..safe_idx];
-                                                let (sanitized, intercepted) = strip_initial_cushions(valid_slice);
-                                                if intercepted {
-                                                    if let Some(first) = buffered_chunks.first_mut() {
-                                                        if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
-                                                            *target = serde_json::Value::String(sanitized.clone());
-                                                        }
-                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
+                                                let (sanitized, _intercepted) = strip_initial_cushions(valid_slice);
+
+                                                let drained = tail_sanitizer.push_and_drain(&sanitized);
+                                                if let Some(first) = buffered_chunks.first_mut() {
+                                                    if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
+                                                        *target = serde_json::Value::String(drained);
                                                     }
-                                                } else {
-                                                    for b in buffered_chunks.drain(..) {
-                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(b.to_string()));
-                                                    }
+                                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
                                                 }
-                                                sliding_tail = sanitized;
-                                                if sliding_tail.len() > 40 {
-                                                    let safe_tail_idx = sliding_tail.floor_char_boundary(sliding_tail.len() - 40);
-                                                    sliding_tail.drain(..safe_tail_idx);
-                                                }
+
                                                 buffered_chunks.clear();
                                                 buffered_text.clear();
                                                 filter_active = false;
