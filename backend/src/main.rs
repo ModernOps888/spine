@@ -571,6 +571,7 @@ async fn chat_completions_handler(
             let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
             let mut buffered_text = String::new();
             let mut tail_sanitizer = StreamTailSanitizer::new(40);
+            let mut phase1_token_delta: i64 = 0;
 
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
@@ -583,7 +584,14 @@ async fn chat_completions_handler(
                                     // Flush any remaining buffered chunks before completing
                                     if filter_active && !buffered_chunks.is_empty() {
                                         let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
+                                        let orig_chars = buffered_text[..safe_idx].chars().count();
                                         let (sanitized, _intercepted) = strip_initial_cushions(&buffered_text[..safe_idx]);
+                                        let sanitized_chars = sanitized.chars().count();
+                                        if orig_chars > sanitized_chars {
+                                            let diff = orig_chars - sanitized_chars;
+                                            phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
+                                        }
+
                                         let drained = tail_sanitizer.push_and_drain(&sanitized);
                                         if let Some(first) = buffered_chunks.first_mut() {
                                             if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
@@ -612,10 +620,30 @@ async fn chat_completions_handler(
 
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
                                 } else if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
-                                    // CoT Exemption Boundary 1: Dedicated provider thought channels (reasoning_content / thought)
-                                    // are emitted directly without censoring or distorting internal model reasoning scratchpad
+                                    // Adjust token usage dynamically if usage object is present in chunk
+                                    let total_token_delta = phase1_token_delta + tail_sanitizer.estimated_token_delta();
+                                    if total_token_delta != 0 {
+                                        if let Some(usage) = parsed.get_mut("usage") {
+                                            if let Some(comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                                                let adjusted = (comp_tok + total_token_delta).max(0);
+                                                usage["completion_tokens"] = json!(adjusted);
+                                                if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                                                    usage["total_tokens"] = json!(prompt_tok + adjusted);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // CoT Exemption Boundary 1: Dedicated provider thought channels (reasoning_content / thought / reasoning / thinking)
+                                    // Covers OpenAI o1/o3/o3-mini, Anthropic thinking_delta, and generic open-source frontier reasoners
                                     let has_reasoning_channel = parsed.pointer("/choices/0/delta/reasoning_content").is_some()
-                                        || parsed.pointer("/choices/0/delta/thought").is_some();
+                                        || parsed.pointer("/choices/0/delta/thought").is_some()
+                                        || parsed.pointer("/choices/0/delta/reasoning").is_some()
+                                        || parsed.pointer("/choices/0/delta/thinking").is_some()
+                                        || parsed.pointer("/delta/thinking").is_some()
+                                        || parsed.get("type").and_then(|t| t.as_str()) == Some("thinking_delta")
+                                        || parsed.pointer("/delta/type").and_then(|t| t.as_str()) == Some("thinking_delta");
+
                                     if has_reasoning_channel {
                                         yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                         continue;
@@ -628,12 +656,39 @@ async fn chat_completions_handler(
                                             in_thought_block = true;
                                         }
                                         if in_thought_block {
-                                            if content.contains("</think>") || content.contains("</thought>") || content.contains("</reasoning>") {
-                                                in_thought_block = false;
+                                            let mut close_idx_opt = None;
+                                            for close_tag in &["</think>", "</thought>", "</reasoning>"] {
+                                                if let Some(pos) = content.find(close_tag) {
+                                                    close_idx_opt = Some(pos + close_tag.len());
+                                                    break;
+                                                }
                                             }
-                                            // Yield internal thought tokens untouched
-                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
-                                            continue;
+
+                                            if let Some(close_idx) = close_idx_opt {
+                                                in_thought_block = false;
+                                                let thought_part = &content[..close_idx];
+                                                let remaining = &content[close_idx..];
+
+                                                if !thought_part.is_empty() {
+                                                    let mut thought_evt = parsed.clone();
+                                                    if let Some(target) = thought_evt.pointer_mut("/choices/0/delta/content") {
+                                                        *target = serde_json::Value::String(thought_part.to_string());
+                                                    }
+                                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
+                                                }
+
+                                                if remaining.is_empty() {
+                                                    continue;
+                                                }
+
+                                                if let Some(target) = parsed.pointer_mut("/choices/0/delta/content") {
+                                                    *target = serde_json::Value::String(remaining.to_string());
+                                                }
+                                            } else {
+                                                // Yield internal thought tokens untouched
+                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                                continue;
+                                            }
                                         }
                                     }
                                     if !filter_active {
@@ -667,7 +722,13 @@ async fn chat_completions_handler(
                                             if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
                                                 let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
                                                 let valid_slice = &buffered_text[..safe_idx];
+                                                let orig_chars = valid_slice.chars().count();
                                                 let (sanitized, _intercepted) = strip_initial_cushions(valid_slice);
+                                                let sanitized_chars = sanitized.chars().count();
+                                                if orig_chars > sanitized_chars {
+                                                    let diff = orig_chars - sanitized_chars;
+                                                    phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
+                                                }
 
                                                 let drained = tail_sanitizer.push_and_drain(&sanitized);
                                                 if let Some(first) = buffered_chunks.first_mut() {
@@ -700,12 +761,31 @@ async fn chat_completions_handler(
     } else {
         let mut json_body: serde_json::Value = upstream_resp.json().await.unwrap_or(json!({}));
         let mut apologies_intercepted = 0;
+        let mut token_adjustment: i64 = 0;
         if let Some(content) = json_body.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
+            let orig_len = content.chars().count();
             let (sanitized, intercepted) = strip_initial_cushions(content);
-            if intercepted {
+            let (fully_sanitized, delayed_intercepted) = vertebrae::sanitize_delayed_apology(&sanitized);
+            if intercepted || delayed_intercepted {
+                let final_len = fully_sanitized.chars().count();
+                if orig_len > final_len {
+                    let diff = orig_len - final_len;
+                    token_adjustment = ((diff as f64) / 3.8).round().max(1.0) as i64;
+                }
                 if let Some(target) = json_body.pointer_mut("/choices/0/message/content") {
-                    *target = serde_json::Value::String(sanitized);
+                    *target = serde_json::Value::String(fully_sanitized);
                     apologies_intercepted += 1;
+                }
+            }
+        }
+        if token_adjustment > 0 {
+            if let Some(usage) = json_body.get_mut("usage") {
+                if let Some(comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                    let adjusted = (comp_tok - token_adjustment).max(0);
+                    usage["completion_tokens"] = json!(adjusted);
+                    if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                        usage["total_tokens"] = json!(prompt_tok + adjusted);
+                    }
                 }
             }
         }
