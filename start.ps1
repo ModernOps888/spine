@@ -12,10 +12,11 @@ if (-not $Quiet) {
     Write-Host "==========================================================" -ForegroundColor Cyan
 }
 
-$binDir = "C:\spine\bin"
-$binPath = "C:\spine\bin\spine.exe"
-$targetBin = "C:\spine\backend\target\debug\spine-gateway.exe"
-$releaseBin = "C:\spine\backend\target\release\spine-gateway.exe"
+$baseDir = if ($PSScriptRoot) { $PSScriptRoot } else { "." }
+$binDir = Join-Path $baseDir "bin"
+$binPath = Join-Path $binDir "spine.exe"
+$targetBin = Join-Path $baseDir "backend\target\debug\spine-gateway.exe"
+$releaseBin = Join-Path $baseDir "backend\target\release\spine-gateway.exe"
 
 if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
@@ -32,7 +33,7 @@ if (Test-Path $targetBin) {
     } catch {}
 } elseif (-not (Test-Path $binPath)) {
     if (-not $Quiet) { Write-Host "Compiling SPINE backend binary..." -ForegroundColor Yellow }
-    cargo build --manifest-path "C:\spine\backend\Cargo.toml"
+    cargo build --manifest-path (Join-Path $baseDir "backend\Cargo.toml")
     try {
         Copy-Item $targetBin $binPath -Force -ErrorAction SilentlyContinue
     } catch {}
@@ -40,9 +41,11 @@ if (Test-Path $targetBin) {
 
 $exeToRun = if (Test-Path $targetBin) { $targetBin } elseif (Test-Path $binPath) { $binPath } else { "spine.exe" }
 
-# Ensure .env is available in C:\spine
-if ((Test-Path "C:\spine\backend\.env") -and (-not (Test-Path "C:\spine\.env"))) {
-    Copy-Item "C:\spine\backend\.env" "C:\spine\.env" -Force -ErrorAction SilentlyContinue
+# Ensure .env is available in root
+$backendEnv = Join-Path $baseDir "backend\.env"
+$rootEnv = Join-Path $baseDir ".env"
+if ((Test-Path $backendEnv) -and (-not (Test-Path $rootEnv))) {
+    Copy-Item $backendEnv $rootEnv -Force -ErrorAction SilentlyContinue
 }
 
 # Start Rust Gateway on port 8080 if not already listening
@@ -50,7 +53,7 @@ $port8080 = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction Sile
 if (-not $port8080) {
     if (-not $Quiet) { Write-Host "`n[1/2] Launching Rust Reality Gateway on http://127.0.0.1:8080 ..." -ForegroundColor Green }
     $windowStyle = if ($Quiet) { "Hidden" } else { "Minimized" }
-    Start-Process -FilePath $exeToRun -WorkingDirectory "C:\spine" -WindowStyle $windowStyle
+    Start-Process -FilePath $exeToRun -WorkingDirectory $baseDir -WindowStyle $windowStyle
     Start-Sleep -Seconds 2
 } else {
     if (-not $Quiet) { Write-Host "`n[1/2] Rust Reality Gateway already listening on http://127.0.0.1:8080" -ForegroundColor Green }
@@ -61,7 +64,8 @@ $port3333 = Get-NetTCPConnection -LocalPort 3333 -State Listen -ErrorAction Sile
 if (-not $port3333) {
     if (-not $Quiet) { Write-Host "[2/2] Launching React 19 / TypeScript HUD on http://localhost:3333 ..." -ForegroundColor Green }
     $frontWindowStyle = if ($Quiet) { "Hidden" } else { "Minimized" }
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", "Set-Location 'C:\spine\frontend'; npm run dev -- --host --port 3333" -WindowStyle $frontWindowStyle
+    $frontDir = Join-Path $baseDir "frontend"
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", "Set-Location '$frontDir'; npm run dev -- --host --port 3333" -WindowStyle $frontWindowStyle
     Start-Sleep -Seconds 2
 } else {
     if (-not $Quiet) { Write-Host "[2/2] React 19 / TypeScript HUD already active on http://localhost:3333" -ForegroundColor Green }
