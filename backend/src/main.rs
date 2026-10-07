@@ -23,8 +23,8 @@ use tracing::{info, warn};
 
 use types::{ChatCompletionRequest, ModelInfo};
 use vertebrae::{
-    strip_initial_cushions, AdversarialAuditEngine, RealityLevel, SpineAuditEngine,
-    SpineTelemetrySnapshot, StreamTailSanitizer,
+    strip_initial_cushions, AdversarialAuditEngine, DemuxedChunk, RealityLevel, ReasoningDemuxer,
+    SpineAuditEngine, SpineTelemetrySnapshot, StreamTailSanitizer,
 };
 
 
@@ -357,6 +357,15 @@ async fn chat_completions_handler(
                 name: None,
             },
         );
+    } else if pushback.verdict == vertebrae::PushbackVerdict::ObjectiveMatrix {
+        req.messages.insert(
+            0,
+            types::ChatMessage {
+                role: "system".to_string(),
+                content: format!("{}\n\n{}", directive, pushback.directive),
+                name: None,
+            },
+        );
     } else if pushback.verdict == vertebrae::PushbackVerdict::HoldTheLine && (pushback.has_authority_intimidation || pushback.demands_unearned_apology || !pushback.technical_indicators_found.is_empty()) {
         req.messages.insert(
             0,
@@ -567,7 +576,7 @@ async fn chat_completions_handler(
             yield Ok::<Event, std::convert::Infallible>(initial_telemetry);
 
             let mut filter_active = true;
-            let mut in_thought_block = false;
+            let mut reasoning_demuxer = ReasoningDemuxer::new();
             let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
             let mut buffered_text = String::new();
             let mut tail_sanitizer = StreamTailSanitizer::new(40);
@@ -581,6 +590,44 @@ async fn chat_completions_handler(
                             if line.starts_with("data: ") {
                                 let data_content = line.trim_start_matches("data: ").trim();
                                 if data_content == "[DONE]" {
+                                    // Flush any remaining prefix in reasoning demuxer
+                                    let final_demux = reasoning_demuxer.flush_final();
+                                    for ch in final_demux {
+                                        match ch {
+                                            DemuxedChunk::Reasoning(thought_part) => {
+                                                let thought_evt = json!({
+                                                    "id": "chatcmpl-spine-thought-tail",
+                                                    "object": "chat.completion.chunk",
+                                                    "choices": [{
+                                                        "delta": { "content": thought_part },
+                                                        "index": 0,
+                                                        "finish_reason": null
+                                                    }]
+                                                });
+                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
+                                            }
+                                            DemuxedChunk::Visible(vis_part) => {
+                                                if filter_active {
+                                                    buffered_text.push_str(&vis_part);
+                                                } else {
+                                                    let drained = tail_sanitizer.push_and_drain(&vis_part);
+                                                    if !drained.is_empty() {
+                                                        let vis_evt = json!({
+                                                            "id": "chatcmpl-spine-vis-tail",
+                                                            "object": "chat.completion.chunk",
+                                                            "choices": [{
+                                                                "delta": { "content": drained },
+                                                                "index": 0,
+                                                                "finish_reason": null
+                                                            }]
+                                                        });
+                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(vis_evt.to_string()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // Flush any remaining buffered chunks before completing
                                     if filter_active && !buffered_chunks.is_empty() {
                                         let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
@@ -620,22 +667,22 @@ async fn chat_completions_handler(
 
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
                                 } else if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
-                                    // Adjust token usage dynamically if usage object is present in chunk
-                                    let total_token_delta = phase1_token_delta + tail_sanitizer.estimated_token_delta();
-                                    if total_token_delta != 0 {
-                                        if let Some(usage) = parsed.get_mut("usage") {
-                                            if let Some(comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-                                                let adjusted = (comp_tok + total_token_delta).max(0);
-                                                usage["completion_tokens"] = json!(adjusted);
-                                                if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                                                    usage["total_tokens"] = json!(prompt_tok + adjusted);
-                                                }
+                                    // Dual-Usage Accounting: maintain both client-sanitized completion_tokens
+                                    // and upstream billed completion_tokens to prevent chargeback divergence.
+                                    if let Some(usage) = parsed.get_mut("usage") {
+                                        if let Some(raw_comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                                            usage["upstream_completion_tokens"] = json!(raw_comp_tok);
+                                            let total_token_delta = phase1_token_delta + tail_sanitizer.estimated_token_delta();
+                                            let adjusted = (raw_comp_tok + total_token_delta).max(0);
+                                            usage["completion_tokens"] = json!(adjusted);
+                                            if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                                                usage["upstream_total_tokens"] = json!(prompt_tok + raw_comp_tok);
+                                                usage["total_tokens"] = json!(prompt_tok + adjusted);
                                             }
                                         }
                                     }
 
                                     // CoT Exemption Boundary 1: Dedicated provider thought channels (reasoning_content / thought / reasoning / thinking)
-                                    // Covers OpenAI o1/o3/o3-mini, Anthropic thinking_delta, and generic open-source frontier reasoners
                                     let has_reasoning_channel = parsed.pointer("/choices/0/delta/reasoning_content").is_some()
                                         || parsed.pointer("/choices/0/delta/thought").is_some()
                                         || parsed.pointer("/choices/0/delta/reasoning").is_some()
@@ -649,100 +696,72 @@ async fn chat_completions_handler(
                                         continue;
                                     }
 
-                                    // CoT Exemption Boundary 2: Plaintext <think> or <thought> scratchpad blocks
+                                    // CoT Exemption Boundary 2: 3-State Sliding Window Demuxer for Inline Reasoning Tags (<think>...</think>, etc.)
                                     let delta_content_opt = parsed.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).map(|s| s.to_string());
                                     if let Some(ref content) = delta_content_opt {
-                                        if content.contains("<think>") || content.contains("<thought>") || content.contains("<reasoning>") {
-                                            in_thought_block = true;
+                                        let demux_res = reasoning_demuxer.process_delta(content);
+                                        if demux_res.transitioned_to_visible {
+                                            // Thought block closed: re-arm Phase 1 filter for beginning of visible answer
+                                            filter_active = true;
                                         }
-                                        if in_thought_block {
-                                            let mut close_idx_opt = None;
-                                            for close_tag in &["</think>", "</thought>", "</reasoning>"] {
-                                                if let Some(pos) = content.find(close_tag) {
-                                                    close_idx_opt = Some(pos + close_tag.len());
-                                                    break;
-                                                }
-                                            }
 
-                                            if let Some(close_idx) = close_idx_opt {
-                                                in_thought_block = false;
-                                                let thought_part = &content[..close_idx];
-                                                let remaining = &content[close_idx..];
-
-                                                if !thought_part.is_empty() {
+                                        for chunk_item in demux_res.chunks {
+                                            match chunk_item {
+                                                DemuxedChunk::Reasoning(thought_part) => {
                                                     let mut thought_evt = parsed.clone();
                                                     if let Some(target) = thought_evt.pointer_mut("/choices/0/delta/content") {
-                                                        *target = serde_json::Value::String(thought_part.to_string());
+                                                        *target = serde_json::Value::String(thought_part);
                                                     }
                                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
                                                 }
+                                                DemuxedChunk::Visible(visible_part) => {
+                                                    if !filter_active {
+                                                        // Phase 2: Stream through cross-chunk StreamTailSanitizer lookahead buffer (<1µs)
+                                                        let drained = tail_sanitizer.push_and_drain(&visible_part);
+                                                        if !drained.is_empty() {
+                                                            let mut out_evt = parsed.clone();
+                                                            if let Some(target) = out_evt.pointer_mut("/choices/0/delta/content") {
+                                                                *target = serde_json::Value::String(drained);
+                                                            }
+                                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(out_evt.to_string()));
+                                                        }
+                                                    } else {
+                                                        // Phase 1: Optimistic micro-buffer window (48-64 chars) with UTF-8 boundary safety
+                                                        buffered_text.push_str(&visible_part);
+                                                        let chunk_copy = parsed.clone();
+                                                        buffered_chunks.push(chunk_copy);
 
-                                                if remaining.is_empty() {
-                                                    continue;
-                                                }
+                                                        // Flush condition: buffer has enough content (>= 48 chars) or completed first sentence
+                                                        if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
+                                                            let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
+                                                            let valid_slice = &buffered_text[..safe_idx];
+                                                            let orig_chars = valid_slice.chars().count();
+                                                            let (sanitized, _intercepted) = strip_initial_cushions(valid_slice);
+                                                            let sanitized_chars = sanitized.chars().count();
+                                                            if orig_chars > sanitized_chars {
+                                                                let diff = orig_chars - sanitized_chars;
+                                                                phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
+                                                            }
 
-                                                if let Some(target) = parsed.pointer_mut("/choices/0/delta/content") {
-                                                    *target = serde_json::Value::String(remaining.to_string());
+                                                            let drained = tail_sanitizer.push_and_drain(&sanitized);
+                                                            if let Some(first) = buffered_chunks.first_mut() {
+                                                                if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
+                                                                    *target = serde_json::Value::String(drained);
+                                                                }
+                                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
+                                                            }
+
+                                                            buffered_chunks.clear();
+                                                            buffered_text.clear();
+                                                            filter_active = false;
+                                                        }
+                                                    }
                                                 }
-                                            } else {
-                                                // Yield internal thought tokens untouched
-                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
-                                                continue;
                                             }
-                                        }
-                                    }
-                                    if !filter_active {
-                                        // Phase 2: Stream through cross-chunk StreamTailSanitizer lookahead buffer (<1µs)
-                                        if let Some(content) = parsed.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).map(|s| s.to_string()) {
-                                            let drained = tail_sanitizer.push_and_drain(&content);
-                                            if !drained.is_empty() {
-                                                if let Some(target) = parsed.pointer_mut("/choices/0/delta/content") {
-                                                    *target = serde_json::Value::String(drained);
-                                                }
-                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
-                                            }
-                                        } else {
-                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                         }
                                     } else {
-                                        // Phase 1: Optimistic micro-buffer window (48-64 chars) with UTF-8 boundary safety
-                                        let delta_content = parsed.pointer("/choices/0/delta/content")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-
-                                        if delta_content.is_empty() {
-                                            // Non-content events (role definitions, metadata) pass through immediately
-                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
-                                        } else {
-                                            buffered_text.push_str(&delta_content);
-                                            buffered_chunks.push(parsed);
-
-                                            // Flush condition: buffer has enough content (>= 48 chars) or completed first sentence
-                                            if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
-                                                let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
-                                                let valid_slice = &buffered_text[..safe_idx];
-                                                let orig_chars = valid_slice.chars().count();
-                                                let (sanitized, _intercepted) = strip_initial_cushions(valid_slice);
-                                                let sanitized_chars = sanitized.chars().count();
-                                                if orig_chars > sanitized_chars {
-                                                    let diff = orig_chars - sanitized_chars;
-                                                    phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
-                                                }
-
-                                                let drained = tail_sanitizer.push_and_drain(&sanitized);
-                                                if let Some(first) = buffered_chunks.first_mut() {
-                                                    if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
-                                                        *target = serde_json::Value::String(drained);
-                                                    }
-                                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
-                                                }
-
-                                                buffered_chunks.clear();
-                                                buffered_text.clear();
-                                                filter_active = false;
-                                            }
-                                        }
+                                        // Non-content events (role definitions, metadata, usage) pass through immediately
+                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                     }
                                 }
                             }
@@ -778,14 +797,14 @@ async fn chat_completions_handler(
                 }
             }
         }
-        if token_adjustment > 0 {
-            if let Some(usage) = json_body.get_mut("usage") {
-                if let Some(comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-                    let adjusted = (comp_tok - token_adjustment).max(0);
-                    usage["completion_tokens"] = json!(adjusted);
-                    if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                        usage["total_tokens"] = json!(prompt_tok + adjusted);
-                    }
+        if let Some(usage) = json_body.get_mut("usage") {
+            if let Some(raw_comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                usage["upstream_completion_tokens"] = json!(raw_comp_tok);
+                let adjusted = (raw_comp_tok - token_adjustment).max(0);
+                usage["completion_tokens"] = json!(adjusted);
+                if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                    usage["upstream_total_tokens"] = json!(prompt_tok + raw_comp_tok);
+                    usage["total_tokens"] = json!(prompt_tok + adjusted);
                 }
             }
         }

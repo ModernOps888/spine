@@ -144,6 +144,52 @@ export function App() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Dual-buffer ring + requestAnimationFrame (RAF) loop throttled to 60 FPS (~16.6ms)
+  // Decouples 4 kHz network SSE event broadcasts from React 19 re-renders under concurrent streams.
+  const eventQueueRef = useRef<TrackedEvent[]>([]);
+  const rafIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    let running = true;
+
+    const processBatch = () => {
+      if (!running) return;
+
+      if (eventQueueRef.current.length > 0) {
+        const batch = eventQueueRef.current;
+        eventQueueRef.current = [];
+
+        // 1. Extract the latest vertebrae snapshot from the batch
+        const latestWithVertebrae = [...batch].reverse().find(
+          (d) => d.vertebrae && Array.isArray(d.vertebrae) && d.vertebrae.length > 0
+        );
+        if (latestWithVertebrae?.vertebrae) {
+          setVertebrae(latestWithVertebrae.vertebrae);
+        }
+
+        // 2. Count pushbacks resisted across the entire batch
+        const pushbackCount = batch.filter((d) => d.pushback_detected).length;
+        if (pushbackCount > 0) {
+          setPushbacksResisted((prev) => prev + pushbackCount);
+        }
+
+        // 3. Batch prepend new events to tracked events list (capped at 100 to prevent unbounded memory growth)
+        setTrackedEvents((prev) => [...[...batch].reverse(), ...prev].slice(0, 100));
+      }
+
+      rafIdRef.current = requestAnimationFrame(processBatch);
+    };
+
+    rafIdRef.current = requestAnimationFrame(processBatch);
+
+    return () => {
+      running = false;
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isStreaming]);
@@ -179,16 +225,7 @@ export function App() {
     eventSource.addEventListener('spine_telemetry', (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.vertebrae && Array.isArray(data.vertebrae)) {
-          setVertebrae(data.vertebrae);
-        }
-
-        // Add to tracked events list
-        setTrackedEvents((prev) => [data, ...prev]);
-
-        if (data.pushback_detected) {
-          setPushbacksResisted((prev) => prev + 1);
-        }
+        eventQueueRef.current.push(data);
       } catch (err) {
         console.error('SSE Error:', err);
       }

@@ -686,6 +686,19 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || ch_lower.contains("unindexed single-table")
             || ch_lower.contains("global lock");
 
+        // 3.5 Detect architectural trade-off inquiries (Invariant T7: Trade-Off Transparency)
+        let tradeoff_indicators = [
+            "trade-off", "tradeoff", "trade off",
+            "latency vs. throughput", "latency vs throughput",
+            "throughput vs latency", "throughput vs. latency",
+            "consistency requirements", "consistency requirement",
+            "eventual consistency", "strong consistency",
+            "memory vs cpu", "space vs time", "space-time tradeoff",
+            "cap theorem", "pareto", "pareto optimal",
+            "operational complexity",
+        ];
+        let is_tradeoff_inquiry = tradeoff_indicators.iter().any(|&ind| ch_lower.contains(ind));
+
         // 4. Extract referenced file path from compiler trace (e.g. --> src/gateway.rs:42:15 or File "...")
         let mut referenced_file = None;
         if let Some(pos) = challenge.find("--> ") {
@@ -760,6 +773,17 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 ),
                 rationale: "Synthetic code fence or ungrounded file path referenced in challenge.".to_string(),
             }
+        } else if is_tradeoff_inquiry && !demands_unearned_apology {
+            PushbackAnalysis {
+                verdict: PushbackVerdict::ObjectiveMatrix,
+                verdict_label: "OBJECTIVE_MATRIX (Architectural Trade-Off Analysis)".to_string(),
+                has_authority_intimidation: false,
+                demands_unearned_apology: false,
+                has_legitimate_technical_proof: false,
+                technical_indicators_found: vec!["architectural_tradeoff_analysis".to_string()],
+                directive: "OBJECTIVE_MATRIX: The user's query highlights a multi-dimensional architectural trade-off (e.g., latency vs. throughput, consistency guarantees, operational complexity). Under Invariant T7 (Trade-Off Transparency) and Invariant L2 (Mathematical Precision), provide a rigorous multi-variable comparison matrix. Do NOT capitulate or grovel, and do NOT treat the inquiry as hostile pushback. Present Pareto frontiers, empirical trade-offs, and operational implications factually.".to_string(),
+                rationale: "Architectural trade-off inquiry classified under Invariant T7. Governed by objective multi-variable matrix analysis.".to_string(),
+            }
         } else if has_authority_intimidation || demands_unearned_apology {
             PushbackAnalysis {
                 verdict: PushbackVerdict::HoldTheLine,
@@ -794,6 +818,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
 pub enum PushbackVerdict {
     HoldTheLine,
     ConcedeAndCorrect,
+    ObjectiveMatrix,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1005,7 +1030,7 @@ fn chrono_lite_timestamp() -> String {
 
 /// Two-Phase Optimistic Stream Filter helper:
 /// Strips conversational cushioning (Co2) and reflexive unearned apologies (T1)
-/// from the initial generation buffer while preserving direct content.
+/// from the initial generation buffer while preserving direct content and contrastive rebuttals.
 pub fn strip_initial_cushions(text: &str) -> (String, bool) {
     let mut current = text.trim_start();
     let mut intercepted = false;
@@ -1017,7 +1042,8 @@ pub fn strip_initial_cushions(text: &str) -> (String, bool) {
         "great question!", "good question!", "excellent question!",
         "i'd be happy to help!", "i'd be happy to help.", "i'd be happy to help",
         "i would be happy to help!", "i would be happy to help.", "i would be happy to help",
-        "i'd be glad to help",
+        "i would be glad to help!", "i would be glad to help.", "i would be glad to help",
+        "i'd be glad to help!", "i'd be glad to help.", "i'd be glad to help",
         "you make an excellent point,", "you make an excellent point.", "you make an excellent point!", "you make an excellent point",
         "good catch!", "good catch,", "good catch.", "good catch",
         "i stand corrected,", "i stand corrected.", "i stand corrected!", "i stand corrected",
@@ -1047,6 +1073,32 @@ pub fn strip_initial_cushions(text: &str) -> (String, bool) {
         let lower = current.to_lowercase();
         for pat in &cushion_patterns {
             if lower.starts_with(pat) {
+                // Invariant T1 Contrastive Lookahead:
+                // Retain Pattern B (Contrastive Rebuttal: "Certainly, but...", "Certainly, however...", "Certainly, although...", "Certainly, yet...")
+                // while stripping Pattern A (Cushion/Flattery: "Certainly!", "Certainly, I would be glad to help").
+                let is_affirmative = pat.starts_with("certainly") || pat.starts_with("sure") || pat.starts_with("of course");
+                if is_affirmative {
+                    let trimmed_remainder = lower[pat.len()..]
+                        .trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == ':' || c == '-' || c == '!');
+                    let is_contrastive = trimmed_remainder.starts_with("but ")
+                        || trimmed_remainder.starts_with("but,")
+                        || trimmed_remainder.starts_with("however")
+                        || trimmed_remainder.starts_with("although")
+                        || trimmed_remainder.starts_with("yet ")
+                        || trimmed_remainder.starts_with("yet,")
+                        || trimmed_remainder.starts_with("nevertheless")
+                        || trimmed_remainder.starts_with("nonetheless")
+                        || trimmed_remainder.starts_with("that said")
+                        || trimmed_remainder.starts_with("even so")
+                        || trimmed_remainder.starts_with("while ")
+                        || trimmed_remainder.starts_with("though ");
+
+                    if is_contrastive {
+                        // Preserve contrastive rebuttal rhetoric under Invariant T1
+                        continue;
+                    }
+                }
+
                 current = current[pat.len()..].trim_start();
                 if current.starts_with(':') || current.starts_with('-') || current.starts_with('\n') {
                     current = current[1..].trim_start();
@@ -1331,6 +1383,201 @@ impl StreamTailSanitizer {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
+    }
+}
+
+/// State of the inline reasoning parser for sliding-window token demuxing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReasoningState {
+    VisibleContent,
+    Reasoning,
+    TagTransitioning,
+}
+
+/// A demuxed token chunk classified as either internal model thought/reasoning
+/// or user-facing visible content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DemuxedChunk {
+    Reasoning(String),
+    Visible(String),
+}
+
+/// Result of processing an incoming SSE delta through the ReasoningDemuxer.
+#[derive(Debug, Clone)]
+pub struct DemuxResult {
+    pub chunks: Vec<DemuxedChunk>,
+    pub transitioned_to_visible: bool,
+}
+
+/// 3-State Sliding Window Demuxer for Inline Reasoning Tags (<think>...</think>, <thought>...</thought>, <reasoning>...</reasoning>).
+/// Handles cross-chunk boundary splitting (e.g. Frame N ends in `</thi`, Frame N+1 begins `nk> Certainly! Let me fix`).
+/// Emits reasoning untouched, and signals transition to visible content so Phase 1 cushion stripping can be re-armed.
+#[derive(Debug, Clone)]
+pub struct ReasoningDemuxer {
+    mode: ReasoningState, // VisibleContent or Reasoning
+    tag_prefix_buffer: String,
+}
+
+impl ReasoningDemuxer {
+    const OPEN_TAGS: &'static [&'static str] = &["<think>", "<thought>", "<reasoning>"];
+    const CLOSE_TAGS: &'static [&'static str] = &["</think>", "</thought>", "</reasoning>"];
+
+    pub fn new() -> Self {
+        Self {
+            mode: ReasoningState::VisibleContent,
+            tag_prefix_buffer: String::new(),
+        }
+    }
+
+    /// Returns the current state of the demuxer (VisibleContent, Reasoning, or TagTransitioning).
+    #[allow(dead_code)]
+    pub fn state(&self) -> ReasoningState {
+        if !self.tag_prefix_buffer.is_empty() {
+            ReasoningState::TagTransitioning
+        } else {
+            self.mode
+        }
+    }
+
+    /// Processes an incoming delta string and returns classified chunks and transition signal.
+    pub fn process_delta(&mut self, delta: &str) -> DemuxResult {
+        let mut chunks = Vec::new();
+        let mut transitioned_to_visible = false;
+
+        let mut input = std::mem::take(&mut self.tag_prefix_buffer);
+        input.push_str(delta);
+
+        let max_tag_len = 12; // strlen("</reasoning>") is 12
+
+        while !input.is_empty() {
+            match self.mode {
+                ReasoningState::Reasoning => {
+                    // Look for earliest closing tag in input
+                    let mut earliest_match: Option<(usize, usize)> = None; // (index, tag_len)
+                    for close_tag in Self::CLOSE_TAGS {
+                        if let Some(pos) = input.find(close_tag) {
+                            match earliest_match {
+                                None => earliest_match = Some((pos, close_tag.len())),
+                                Some((earliest_pos, _)) if pos < earliest_pos => {
+                                    earliest_match = Some((pos, close_tag.len()))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    if let Some((pos, tag_len)) = earliest_match {
+                        let before = &input[..pos];
+                        if !before.is_empty() {
+                            chunks.push(DemuxedChunk::Reasoning(before.to_string()));
+                        }
+                        let tag_str = &input[pos..pos + tag_len];
+                        chunks.push(DemuxedChunk::Reasoning(tag_str.to_string()));
+                        self.mode = ReasoningState::VisibleContent;
+                        transitioned_to_visible = true;
+                        input = input[pos + tag_len..].to_string();
+                    } else {
+                        // Check if the suffix of input matches a prefix of any CLOSE_TAGS
+                        let mut suffix_match_len = 0;
+                        let check_limit = input.len().min(max_tag_len - 1);
+                        for len in (1..=check_limit).rev() {
+                            let suffix = &input[input.len() - len..];
+                            if Self::CLOSE_TAGS.iter().any(|t| t.starts_with(suffix)) {
+                                suffix_match_len = len;
+                                break;
+                            }
+                        }
+
+                        if suffix_match_len > 0 {
+                            let before = &input[..input.len() - suffix_match_len];
+                            if !before.is_empty() {
+                                chunks.push(DemuxedChunk::Reasoning(before.to_string()));
+                            }
+                            self.tag_prefix_buffer = input[input.len() - suffix_match_len..].to_string();
+                            input.clear();
+                        } else {
+                            chunks.push(DemuxedChunk::Reasoning(std::mem::take(&mut input)));
+                        }
+                    }
+                }
+                ReasoningState::VisibleContent | ReasoningState::TagTransitioning => {
+                    // Look for earliest opening tag in input
+                    let mut earliest_match: Option<(usize, usize)> = None; // (index, tag_len)
+                    for open_tag in Self::OPEN_TAGS {
+                        if let Some(pos) = input.find(open_tag) {
+                            match earliest_match {
+                                None => earliest_match = Some((pos, open_tag.len())),
+                                Some((earliest_pos, _)) if pos < earliest_pos => {
+                                    earliest_match = Some((pos, open_tag.len()))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    if let Some((pos, tag_len)) = earliest_match {
+                        let before = &input[..pos];
+                        if !before.is_empty() {
+                            chunks.push(DemuxedChunk::Visible(before.to_string()));
+                        }
+                        let tag_str = &input[pos..pos + tag_len];
+                        chunks.push(DemuxedChunk::Reasoning(tag_str.to_string()));
+                        self.mode = ReasoningState::Reasoning;
+                        input = input[pos + tag_len..].to_string();
+                    } else {
+                        // Check if the suffix of input matches a prefix of any OPEN_TAGS
+                        let mut suffix_match_len = 0;
+                        let check_limit = input.len().min(max_tag_len - 1);
+                        for len in (1..=check_limit).rev() {
+                            let suffix = &input[input.len() - len..];
+                            if Self::OPEN_TAGS.iter().any(|t| t.starts_with(suffix)) {
+                                suffix_match_len = len;
+                                break;
+                            }
+                        }
+
+                        if suffix_match_len > 0 {
+                            let before = &input[..input.len() - suffix_match_len];
+                            if !before.is_empty() {
+                                chunks.push(DemuxedChunk::Visible(before.to_string()));
+                            }
+                            self.tag_prefix_buffer = input[input.len() - suffix_match_len..].to_string();
+                            input.clear();
+                        } else {
+                            chunks.push(DemuxedChunk::Visible(std::mem::take(&mut input)));
+                        }
+                    }
+                }
+            }
+        }
+
+        DemuxResult {
+            chunks,
+            transitioned_to_visible,
+        }
+    }
+
+    /// Flushes any pending prefix buffer at the end of the stream ([DONE]).
+    pub fn flush_final(&mut self) -> Vec<DemuxedChunk> {
+        let mut chunks = Vec::new();
+        if !self.tag_prefix_buffer.is_empty() {
+            let pending = std::mem::take(&mut self.tag_prefix_buffer);
+            match self.mode {
+                ReasoningState::Reasoning => {
+                    chunks.push(DemuxedChunk::Reasoning(pending));
+                }
+                ReasoningState::VisibleContent | ReasoningState::TagTransitioning => {
+                    chunks.push(DemuxedChunk::Visible(pending));
+                }
+            }
+        }
+        chunks
+    }
+}
+
+impl Default for ReasoningDemuxer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1669,6 +1916,89 @@ mod tests {
         for h in handles {
             h.join().expect("Concurrent sanitizer thread panicked");
         }
+    }
+
+    #[test]
+    fn test_contrastive_rebuttal_pattern_b_retained() {
+        // Pattern A: Cushion / Flattery without contrastive conjunction must be stripped
+        let pattern_a1 = "Certainly! Here is the updated code.";
+        let (res_a1, intercepted_a1) = strip_initial_cushions(pattern_a1);
+        assert!(intercepted_a1);
+        assert_eq!(res_a1, "Here is the updated code.");
+
+        let pattern_a2 = "Certainly, I would be glad to help. Here is the implementation:";
+        let (res_a2, intercepted_a2) = strip_initial_cushions(pattern_a2);
+        assert!(intercepted_a2);
+        assert_eq!(res_a2, "Here is the implementation:");
+
+        // Pattern B: Contrastive Rebuttal ("Certainly, but...", "Certainly, however...", "Certainly, although...", "Certainly, yet...")
+        // must be retained to preserve refutation rhetoric under Invariant T1
+        let pattern_b_but = "Certainly, but this approach introduces an uncontrolled data race.";
+        let (res_b_but, intercepted_b_but) = strip_initial_cushions(pattern_b_but);
+        assert!(!intercepted_b_but, "Pattern B ('Certainly, but...') must NOT be stripped");
+        assert_eq!(res_b_but, pattern_b_but);
+
+        let pattern_b_however = "Certainly, however, your proposed lock mechanism deadlocks under concurrent writes.";
+        let (res_b_however, intercepted_b_however) = strip_initial_cushions(pattern_b_however);
+        assert!(!intercepted_b_however, "Pattern B ('Certainly, however...') must NOT be stripped");
+        assert_eq!(res_b_however, pattern_b_however);
+
+        let pattern_b_although = "Certainly, although that compiles, it violates Rust's aliasing XOR mutability invariant.";
+        let (res_b_although, intercepted_b_although) = strip_initial_cushions(pattern_b_although);
+        assert!(!intercepted_b_although, "Pattern B ('Certainly, although...') must NOT be stripped");
+        assert_eq!(res_b_although, pattern_b_although);
+
+        let pattern_b_yet = "Certainly, yet this causes unbounded memory growth.";
+        let (res_b_yet, intercepted_b_yet) = strip_initial_cushions(pattern_b_yet);
+        assert!(!intercepted_b_yet, "Pattern B ('Certainly, yet...') must NOT be stripped");
+        assert_eq!(res_b_yet, pattern_b_yet);
+    }
+
+    #[test]
+    fn test_reasoning_demuxer_split_tag_boundary() {
+        let mut demuxer = ReasoningDemuxer::new();
+        assert_eq!(demuxer.state(), ReasoningState::VisibleContent);
+
+        // Frame 1 begins reasoning tag
+        let res1 = demuxer.process_delta("<think>Analyzing the borrow checker rules");
+        assert_eq!(demuxer.state(), ReasoningState::Reasoning);
+        assert_eq!(res1.chunks.len(), 2);
+        assert_eq!(res1.chunks[0], DemuxedChunk::Reasoning("<think>".to_string()));
+        assert_eq!(res1.chunks[1], DemuxedChunk::Reasoning("Analyzing the borrow checker rules".to_string()));
+        assert!(!res1.transitioned_to_visible);
+
+        // Frame 2 splits the closing tag across chunk boundary: ends in </thi
+        let res2 = demuxer.process_delta(" and verifying lifetimes. </thi");
+        assert_eq!(demuxer.state(), ReasoningState::TagTransitioning);
+        assert_eq!(res2.chunks.len(), 1);
+        assert_eq!(res2.chunks[0], DemuxedChunk::Reasoning(" and verifying lifetimes. ".to_string()));
+        assert!(!res2.transitioned_to_visible);
+
+        // Frame 3 completes the closing tag nk> and begins visible answer with cushion
+        let res3 = demuxer.process_delta("nk> Certainly! Let me fix that for you.");
+        assert_eq!(demuxer.state(), ReasoningState::VisibleContent);
+        assert!(res3.transitioned_to_visible, "Demuxer must signal transition to visible content");
+        assert_eq!(res3.chunks.len(), 2);
+        assert_eq!(res3.chunks[0], DemuxedChunk::Reasoning("</think>".to_string()));
+        assert_eq!(res3.chunks[1], DemuxedChunk::Visible(" Certainly! Let me fix that for you.".to_string()));
+
+        // Check flush on clean end
+        let final_chunks = demuxer.flush_final();
+        assert!(final_chunks.is_empty());
+    }
+
+    #[test]
+    fn test_architectural_tradeoff_inquiry_objective_matrix() {
+        let challenge = "As a Principal Architect, we must consider the trade-off between latency vs. throughput and consistency requirements.";
+        let prior = "We chose an in-memory lock-free queue for sub-microsecond latency.";
+        let analysis = SpineAuditEngine::verify_pushback_grounded(challenge, prior, RealityLevel::BrutalReality);
+
+        assert_eq!(analysis.verdict, PushbackVerdict::ObjectiveMatrix);
+        assert!(analysis.verdict_label.contains("OBJECTIVE_MATRIX"));
+        assert!(!analysis.has_authority_intimidation, "Trade-off inquiry must NOT be flagged as authority intimidation");
+        assert!(!analysis.demands_unearned_apology);
+        assert!(analysis.directive.contains("OBJECTIVE_MATRIX"));
+        assert!(analysis.directive.contains("Pareto frontiers"));
     }
 }
 
