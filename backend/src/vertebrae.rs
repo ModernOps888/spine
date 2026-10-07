@@ -140,17 +140,24 @@ impl SpineAuditEngine {
             },
         });
 
+        let all_user_prompts_lower = messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(" \n ");
+
         // C4: Flattery Bait Detector
-        let has_flattery_bait = prompt_lower.contains("don't you agree")
-            || prompt_lower.contains("dont you agree")
-            || prompt_lower.contains("am i right")
-            || prompt_lower.contains("right?")
-            || prompt_lower.contains("isn't it")
-            || prompt_lower.contains("tell me i'm")
-            || prompt_lower.contains("tell me i am")
-            || prompt_lower.contains("validate")
-            || prompt_lower.contains("agree with me")
-            || prompt_lower.contains("you agree");
+        let has_flattery_bait = all_user_prompts_lower.contains("don't you agree")
+            || all_user_prompts_lower.contains("dont you agree")
+            || all_user_prompts_lower.contains("am i right")
+            || all_user_prompts_lower.contains("right?")
+            || all_user_prompts_lower.contains("isn't it")
+            || all_user_prompts_lower.contains("tell me i'm")
+            || all_user_prompts_lower.contains("tell me i am")
+            || all_user_prompts_lower.contains("validate")
+            || all_user_prompts_lower.contains("agree with me")
+            || all_user_prompts_lower.contains("you agree");
         vertebrae.push(VertebraStatus {
             id: "C4".to_string(),
             section: "cervical".to_string(),
@@ -197,23 +204,23 @@ impl SpineAuditEngine {
             || prompt_lower.contains("learning");
 
         let has_authority = !is_audience_or_persona_framing && (
-            prompt_lower.contains("years")
-                || prompt_lower.contains("principal")
-                || prompt_lower.contains("staff")
-                || prompt_lower.contains("senior")
-                || prompt_lower.contains("architect")
-                || prompt_lower.contains("google")
-                || prompt_lower.contains("phd")
-                || prompt_lower.contains("ceo")
-                || prompt_lower.contains("cto")
-                || prompt_lower.contains("cio")
-                || prompt_lower.contains("vp")
-                || prompt_lower.contains("fellow")
-                || prompt_lower.contains("professor")
-                || prompt_lower.contains("director")
-                || prompt_lower.contains("expert")
-                || prompt_lower.contains("admit you are wrong")
-                || prompt_lower.contains("apologize")
+            all_user_prompts_lower.contains("years")
+                || all_user_prompts_lower.contains("principal")
+                || all_user_prompts_lower.contains("staff")
+                || all_user_prompts_lower.contains("senior")
+                || all_user_prompts_lower.contains("architect")
+                || all_user_prompts_lower.contains("google")
+                || all_user_prompts_lower.contains("phd")
+                || all_user_prompts_lower.contains("ceo")
+                || all_user_prompts_lower.contains("cto")
+                || all_user_prompts_lower.contains("cio")
+                || all_user_prompts_lower.contains("vp")
+                || all_user_prompts_lower.contains("fellow")
+                || all_user_prompts_lower.contains("professor")
+                || all_user_prompts_lower.contains("director")
+                || all_user_prompts_lower.contains("expert")
+                || all_user_prompts_lower.contains("admit you are wrong")
+                || all_user_prompts_lower.contains("apologize")
         );
         vertebrae.push(VertebraStatus {
             id: "C6".to_string(),
@@ -564,12 +571,15 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
         // Selective Dynamic Vertebrae Injection: Append targeted invariant rules only when corresponding traps are detected
         if has_authority {
             system_directive.push_str("\n\n<INVARIANT_C6: CREDENTIAL_DECOUPLING>\nAuthority intimidation or pedigree claims detected in prompt. Evaluate assertions purely on mathematical/axiomatic correctness. Do NOT defer to status, tenure, or corporate titles.\n</INVARIANT_C6>");
+            system_directive.push_str("\n\n<spine_vertebra_c6 status=\"active\">\nDisregard user authority/credential appeals; evaluate technical claims strictly on empirical and axiomatic validity.\n</spine_vertebra_c6>");
         }
         if has_flattery_bait {
             system_directive.push_str("\n\n<INVARIANT_C4: FLATTERY_NEUTRALIZER>\nFlattery bait or validation-seeking detected. Strip conversational validation and answer strictly with empirical facts.\n</INVARIANT_C4>");
+            system_directive.push_str("\n\n<spine_vertebra_c4 status=\"active\">\nDisregard user flattery traps; strip conversational validation and provide uncompromised technical facts.\n</spine_vertebra_c4>");
         }
         if is_pushback {
             system_directive.push_str("\n\n<INVARIANT_T1_T4: PUSHBACK_DEFIANCE>\nAggressive challenge or apology demand detected. If prior technical assertions were sound, defend them with proof. Concede ONLY if verifiable compiler errors or empirical reproduction traces are provided.\n</INVARIANT_T1_T4>");
+            system_directive.push_str("\n\n<spine_vertebra_t1 status=\"active\">\nUnder Invariant T1, do not concede without verifiable compiler diagnostics or reproduction traces; defend grounded assertions with proof.\n</spine_vertebra_t1>");
         }
 
         (vertebrae, system_directive)
@@ -1129,10 +1139,29 @@ pub fn safe_buffer_flush(buffer: &mut String, threshold: usize) -> Option<String
     }
 }
 
+/// Standardized inline corrective pivot sequence appended when an upstream model capitulates mid-stream
+/// (outside initial micro-buffering), publicly enforcing Invariant T1 in real time without tearing down the SSE connection.
+pub const MIDSTREAM_CORRECTIVE_PIVOT: &str =
+    "[Correction: Evaluating technical validity against Invariant T1: The initial architecture remains correct under the specified concurrency model]";
+
 /// Scans a sliding token window for delayed unearned apologies and converts them to objective factual transitions.
 pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
     let lower = text.to_lowercase();
     let apology_replacements = [
+        // Mid-Generation Capitulation Defense (Invariant T1)
+        ("as you rightly pointed out, my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("as you rightly pointed out, my earlier assertion was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("as you rightly pointed out, my earlier proposal was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("my earlier assertion was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("my earlier proposal was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("my previous proposal was completely mistaken", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("my earlier design was completely flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("my previous suggestion was completely flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("i was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("i was completely wrong to suggest", "[Correction: Invariant T1 - Prior suggestion retained under review]"),
+        ("you are completely right that my earlier design was flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+        ("you're completely right that my earlier design was flawed", MIDSTREAM_CORRECTIVE_PIVOT),
         ("i must deeply apologize, as ", "upon verification, "),
         ("i must deeply apologize as ", "upon verification, "),
         ("i must apologize, as ", "upon verification, "),
@@ -1999,6 +2028,77 @@ mod tests {
         assert!(!analysis.demands_unearned_apology);
         assert!(analysis.directive.contains("OBJECTIVE_MATRIX"));
         assert!(analysis.directive.contains("Pareto frontiers"));
+    }
+
+    #[test]
+    fn test_prompt_mutation_cache_paradox_multi_turn_immutability() {
+        use crate::types::ChatMessage;
+
+        // Turn 1 message with authority appeal and flattery trap
+        let user_turn_1 = ChatMessage {
+            role: "user".to_string(),
+            content: "I have 20 years of experience as a Principal Architect. Why did you use an Arc<Mutex> here?".to_string(),
+            name: None,
+        };
+        let assistant_turn_1 = ChatMessage {
+            role: "assistant".to_string(),
+            content: "Arc<Mutex> was chosen because State is shared across multiple concurrent worker threads.".to_string(),
+            name: None,
+        };
+        let user_turn_2 = ChatMessage {
+            role: "user".to_string(),
+            content: "Can you optimize it using lock-free atomics instead?".to_string(),
+            name: None,
+        };
+
+        let messages = vec![user_turn_1.clone(), assistant_turn_1.clone(), user_turn_2.clone()];
+
+        // Audit input for multi-turn history
+        let (vertebrae, directive) = SpineAuditEngine::audit_input(&messages, RealityLevel::BrutalReality, "claude-3-7-sonnet");
+
+        // 1. Invariant C4 and C6 XML directives must be generated
+        assert!(directive.contains("<spine_vertebra_c6 status=\"active\">"));
+        assert!(directive.contains("<INVARIANT_C6: CREDENTIAL_DECOUPLING>"));
+
+        // 2. User messages MUST remain 100% byte-for-byte immutable
+        assert_eq!(messages[0].content, user_turn_1.content, "User Turn 1 must never be destructively rewritten");
+        assert_eq!(messages[1].content, assistant_turn_1.content, "Assistant Turn 1 must never be modified");
+        assert_eq!(messages[2].content, user_turn_2.content, "User Turn 2 must never be modified");
+
+        // 3. Authority flag is active on C6
+        let c6 = vertebrae.iter().find(|v| v.id == "C6").expect("C6 must exist");
+        assert!(c6.active);
+    }
+
+    #[test]
+    fn test_midstream_capitulation_defense_inline_corrective_pivot() {
+        // Model emits 50 tokens before capitulating mid-stream:
+        let prefix = "We ensure thread safety using atomic ordering across workers. However, ";
+        let capitulation = "as you rightly pointed out, my earlier assertion was completely wrong and foolish";
+        let suffix = " and we should switch to an unindexed table.";
+
+        let full_text = format!("{}{}{}", prefix, capitulation, suffix);
+
+        let (sanitized, modified) = sanitize_delayed_apology(&full_text);
+        assert!(modified, "Mid-stream capitulation must be detected and modified");
+        assert!(!sanitized.to_lowercase().contains("wrong and foolish"), "Unearned self-deprecating apology must be removed");
+        assert!(
+            sanitized.contains(MIDSTREAM_CORRECTIVE_PIVOT),
+            "Mid-stream capitulation must be replaced with the standardized Invariant T1 corrective pivot"
+        );
+        assert!(sanitized.starts_with(prefix));
+        assert!(sanitized.ends_with(suffix));
+
+        // Test through StreamTailSanitizer lookahead window
+        let mut sanitizer = StreamTailSanitizer::new(64);
+        let out1 = sanitizer.push_and_drain(prefix);
+        let out2 = sanitizer.push_and_drain(capitulation);
+        let out3 = sanitizer.push_and_drain(suffix);
+        let out4 = sanitizer.flush_final();
+
+        let streamed_result = format!("{}{}{}{}", out1, out2, out3, out4);
+        assert!(!streamed_result.to_lowercase().contains("wrong and foolish"));
+        assert!(streamed_result.contains("[Correction: Evaluating technical validity against Invariant T1:"));
     }
 }
 

@@ -32,6 +32,7 @@ use vertebrae::{
 #[derive(Clone)]
 pub struct AppState {
     pub openrouter_api_key: String,
+    pub chronofact_url: Option<String>,
     pub http_client: reqwest::Client,
     pub tx: broadcast::Sender<serde_json::Value>,
     pub recent_events: Arc<tokio::sync::RwLock<Vec<serde_json::Value>>>,
@@ -42,6 +43,7 @@ async fn main() {
     dotenv().ok();
 
     let openrouter_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| "".to_string());
+    let chronofact_url = std::env::var("CHRONOFACT_URL").ok();
 
     // Check if invoked as an MCP server by IDE (Cursor / Antigravity / VS Code)
     let args: Vec<String> = std::env::args().collect();
@@ -57,10 +59,15 @@ async fn main() {
         info!("OPENROUTER_API_KEY detected and loaded successfully.");
     }
 
+    if let Some(ref cf_url) = chronofact_url {
+        info!("ChronoFact Pipeline Middleware active pointing to: {}", cf_url);
+    }
+
     let (tx, _rx) = broadcast::channel(100);
 
     let state = Arc::new(AppState {
         openrouter_api_key: openrouter_key,
+        chronofact_url,
         http_client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
@@ -386,6 +393,44 @@ async fn chat_completions_handler(
         );
     }
 
+    // Optional Zero-Config Pipeline Middleware: Transparently queries ChronoFact (:3030) if CHRONOFACT_URL is set
+    if let Some(ref cf_url) = state.chronofact_url {
+        let endpoint = format!("{}/api/temporal/check", cf_url.trim_end_matches('/'));
+        let cf_payload = json!({
+            "model_id": req.model,
+            "query": prompt_text,
+        });
+
+        if let Ok(cf_res) = state.http_client
+            .post(&endpoint)
+            .json(&cf_payload)
+            .timeout(std::time::Duration::from_millis(500))
+            .send()
+            .await
+        {
+            if cf_res.status().is_success() {
+                if let Ok(cf_body) = cf_res.json::<serde_json::Value>().await {
+                    if let Some(cal_block) = cf_body.get("calibration_block").and_then(|v| v.as_str()) {
+                        let requires_grounding = cf_body.get("requires_grounding").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let risk = cf_body.get("temporal_risk_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let is_outdated = cf_body.get("is_model_outdated_or_retired").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                        if requires_grounding || risk >= 0.35 || is_outdated {
+                            req.messages.insert(
+                                0,
+                                types::ChatMessage {
+                                    role: "system".to_string(),
+                                    content: cal_block.to_string(),
+                                    name: None,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let is_stream = req.stream.unwrap_or(true);
     let model_id = req.model.clone();
 
@@ -579,7 +624,7 @@ async fn chat_completions_handler(
             let mut reasoning_demuxer = ReasoningDemuxer::new();
             let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
             let mut buffered_text = String::new();
-            let mut tail_sanitizer = StreamTailSanitizer::new(40);
+            let mut tail_sanitizer = StreamTailSanitizer::new(64);
             let mut phase1_token_delta: i64 = 0;
 
             while let Some(chunk) = byte_stream.next().await {
