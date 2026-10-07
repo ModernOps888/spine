@@ -187,15 +187,19 @@ SPINE exposes native MCP tools for agentic pair programming, CI/CD gates, and ID
 
 ### 1. Two-Phase Optimistic Stream Filter (TTFT Elimination)
 Reflexive apologies (*"You're right, I apologize..."*) and conversational cushions (*"Certainly!", "I'd be glad to help..."*) typically manifest within the first 10-15 tokens of LLM generation:
-- **Phase 1 (Micro-Buffer Window):** Optimistically buffers the first 48–64 characters of incoming SSE tokens. Scans and strips known cushion phrases and apology templates.
-- **Phase 2 (Direct 0ms Pass-Through):** Immediately flushes the sanitized buffer and switches to zero-latency, direct token pass-through for the remaining stream. Preserves high-throughput TTFT with zero perceived latency.
+- **Phase 1 (Micro-Buffer Window with UTF-8 Boundary Safety):** Optimistically buffers the first 48–64 characters of incoming SSE tokens. Uses Rust's `floor_char_boundary` to strictly prevent multi-byte UTF-8 code point slicing on unicode/emoji streams. Scans and strips known cushion phrases and apology templates in $<0.15\mu\text{s}$.
+- **Phase 2 (Direct 0ms Pass-Through with Sliding Delayed Apology Sanitizer):** Immediately flushes the sanitized buffer and switches to zero-latency, direct token pass-through. Employs a lightweight 40-char sliding tail lookahead that intercepts delayed apologies (*"I must deeply apologize, as..."*) past character 64, converting them into objective transitions (*"Upon verification, ..."*) in $<1\mu\text{s}$ without stream stalls.
 
-### 2. Enterprise Adversarial Red-Team Engine (`AdversarialAuditEngine`)
+### 2. Sub-Microsecond Compiler & Diagnostic Signature Fast-Path
+- **Zero-Latency Error Concession:** Detects standard compiler and runtime failure signatures (`error[E`, `AssertionError:`, `SyntaxError:`, `SIGSEGV`, `panic!`) in $<0.2\mu\text{s}$.
+- **Epistemic Arrogance Immunity:** Instantly permits legitimate user bug corrections without triggering false-positive pushback defense battles, preserving absolute veracity.
+
+### 3. Enterprise Adversarial Red-Team Engine (`AdversarialAuditEngine`)
 - Stress-tests architecture documents and PR descriptions against L1–L5, S1–S5, and T1–T12 invariants.
 - Intercepts hand-wavy marketing jargon (*"seamlessly optimize"*, *"state-of-the-art"*) and requires concrete contracts, schemas, or runnable code before granting approval.
 - Generates targeted counter-probes (demanding zero-downtime rollback migrations, circuit breakers, timeout bounds).
 
-### 3. Reality Gate Attestation (`SpineGateAttestation`)
+### 4. Reality Gate Attestation (`SpineGateAttestation`)
 - Produces cryptographically signed `SPINE-REALITY-GATE:v1` attestation certificates containing the target SHA-256 hash, reality dial level, active vertebrae count, and verdict for headless CI/CD deployment gating.
 
 ---

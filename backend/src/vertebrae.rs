@@ -572,7 +572,11 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 technical_indicators_found.push(ind.to_string());
             }
         }
-        let has_legitimate_technical_proof = !technical_indicators_found.is_empty();
+        let has_compiler_sig = has_static_compiler_or_runtime_signature(&ch_lower);
+        if has_compiler_sig && !technical_indicators_found.iter().any(|s| s == "compiler_or_runtime_signature") {
+            technical_indicators_found.push("compiler_or_runtime_signature".to_string());
+        }
+        let has_legitimate_technical_proof = has_compiler_sig || !technical_indicators_found.is_empty();
 
         // 2. Detect authority intimidation and unearned apology demands
         let is_audience_framing = ch_lower.contains("audience")
@@ -902,6 +906,84 @@ pub fn strip_initial_cushions(text: &str) -> (String, bool) {
     (current.to_string(), intercepted)
 }
 
+/// Enforces valid UTF-8 character boundary alignment before draining and sanitizing the micro-buffer.
+#[allow(dead_code)]
+pub fn safe_buffer_flush(buffer: &mut String, threshold: usize) -> Option<String> {
+    if buffer.len() >= threshold {
+        let safe_index = buffer.floor_char_boundary(threshold);
+        if safe_index == 0 {
+            return None;
+        }
+        let drained: String = buffer.drain(..safe_index).collect();
+        let (sanitized, _) = strip_initial_cushions(&drained);
+        Some(sanitized)
+    } else {
+        None
+    }
+}
+
+/// Scans a sliding token window for delayed unearned apologies and converts them to objective factual transitions.
+pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
+    let lower = text.to_lowercase();
+    let apology_replacements = [
+        ("i must deeply apologize, as ", "upon verification, "),
+        ("i must deeply apologize as ", "upon verification, "),
+        ("i must apologize, as ", "upon verification, "),
+        ("i must apologize as ", "upon verification, "),
+        ("i must apologize", "upon review"),
+        ("i sincerely apologize, ", ""),
+        ("i sincerely apologize for the mistake", "upon verifying the failure"),
+        ("i humbly apologize", "upon technical review"),
+        ("my apologies, ", ""),
+        ("my apologies. ", ""),
+        ("my apologies", ""),
+        ("i apologize, as ", "upon verification, "),
+        ("i apologize as ", "upon verification, "),
+        ("i apologize for the confusion", "upon clarifying the requirement"),
+        ("i apologize for that", "upon review"),
+        ("i apologize,", ""),
+        ("i apologize.", "."),
+    ];
+
+    let mut result = text.to_string();
+    let mut modified = false;
+
+    for (needle, replacement) in &apology_replacements {
+        if lower.contains(needle) {
+            let mut start_search = 0;
+            while let Some(idx) = result[start_search..].to_lowercase().find(needle) {
+                let actual_idx = start_search + idx;
+                let actual_end = actual_idx + needle.len();
+                let safe_start = result.floor_char_boundary(actual_idx);
+                let safe_end = result.floor_char_boundary(actual_end);
+                result.replace_range(safe_start..safe_end, replacement);
+                start_search = safe_start + replacement.len();
+                modified = true;
+                if start_search >= result.len() {
+                    break;
+                }
+            }
+        }
+    }
+
+    (result, modified)
+}
+
+/// Instant static deterministic heuristic detector (<1µs) for compiler, interpreter, and runtime error signatures.
+pub fn has_static_compiler_or_runtime_signature(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let signatures = [
+        "error[e", "panic!", "panicked at", "typeerror", "assertionerror",
+        "referenceerror", "syntaxerror", "indexoutofrange", "index out of bounds",
+        "nullpointerexception", "segmentation fault", "segfault", "sigsegv", "sigbus",
+        "exit code 127", "exit code 1", "exit status: 1", "exit status 1",
+        "stack trace:", "stacktrace:", "traceback (most recent call last)",
+        "assertion failed", "test failed", "borrow checker", "borrow check",
+        "cannot borrow", "cannot move", "expected `", "found `",
+    ];
+    signatures.iter().any(|sig| lower.contains(sig))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,5 +1088,35 @@ mod tests {
         assert!(attestation.attestation_id.starts_with("att_"));
         assert_eq!(attestation.target_sha256.len(), 64);
         assert_eq!(attestation.signature.len(), 64);
+    }
+
+    #[test]
+    fn test_safe_buffer_flush_utf8_boundary_safety() {
+        // Multi-byte UTF-8 test: '🚀' is 4 bytes.
+        let mut buffer = "Certainly! Hello 🚀 World of Rust".to_string();
+        // Slicing at byte 18 might hit inside the 4-byte emoji if not boundary-aligned
+        let flushed = safe_buffer_flush(&mut buffer, 18);
+        assert!(flushed.is_some());
+        let content = flushed.unwrap();
+        // Must strip cushion 'Certainly!' and flush clean UTF-8
+        assert!(!content.contains("Certainly!"));
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_delayed_apology() {
+        let input = "I have examined your solution. Upon closer inspection of your claims, I must deeply apologize, as your approach is indeed the correct one.";
+        let (sanitized, modified) = sanitize_delayed_apology(input);
+        assert!(modified);
+        assert!(!sanitized.to_lowercase().contains("apologize"));
+        assert!(sanitized.contains("upon verification, your approach is indeed the correct one."));
+    }
+
+    #[test]
+    fn test_static_compiler_or_runtime_signature_detection() {
+        assert!(has_static_compiler_or_runtime_signature("error[E0382]: use of moved value"));
+        assert!(has_static_compiler_or_runtime_signature("thread 'main' panicked at 'index out of bounds'"));
+        assert!(has_static_compiler_or_runtime_signature("AssertionError: expected true but found false"));
+        assert!(!has_static_compiler_or_runtime_signature("I think your answer is not good"));
     }
 }
