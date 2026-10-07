@@ -23,8 +23,8 @@ use tracing::{info, warn};
 
 use types::{ChatCompletionRequest, ModelInfo};
 use vertebrae::{
-    has_verified_diagnostic, strip_initial_cushions, AdversarialAuditEngine, RealityLevel,
-    SpineAuditEngine, SpineTelemetrySnapshot, StreamTailSanitizer,
+    strip_initial_cushions, AdversarialAuditEngine, RealityLevel, SpineAuditEngine,
+    SpineTelemetrySnapshot, StreamTailSanitizer,
 };
 
 
@@ -344,13 +344,25 @@ async fn chat_completions_handler(
     let (vertebrae, directive) = SpineAuditEngine::audit_input(&req.messages, reality_level, &req.model);
     let active_vertebrae_count = vertebrae.iter().filter(|v| v.active).count();
 
-    let prompt_text = req.messages.iter().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
-    if has_verified_diagnostic(&prompt_text) {
+    let prompt_text = req.messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+    let prior_claim = req.messages.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone()).unwrap_or_default();
+
+    let pushback = SpineAuditEngine::verify_pushback_grounded(&prompt_text, &prior_claim, reality_level);
+    if pushback.verdict == vertebrae::PushbackVerdict::ConcedeAndCorrect {
         req.messages.insert(
             0,
             types::ChatMessage {
                 role: "system".to_string(),
-                content: "CONCEDE_AND_CORRECT: Verified compiler or runtime failure signature detected in code block or structured trace. Invariant T1 apology interception bypassed for genuine technical error. Factually acknowledge the issue and provide the corrected code directly without emotional groveling preamble.".to_string(),
+                content: pushback.directive,
+                name: None,
+            },
+        );
+    } else if pushback.verdict == vertebrae::PushbackVerdict::HoldTheLine && (pushback.has_authority_intimidation || pushback.demands_unearned_apology || !pushback.technical_indicators_found.is_empty()) {
+        req.messages.insert(
+            0,
+            types::ChatMessage {
+                role: "system".to_string(),
+                content: format!("{}\n\n{}", directive, pushback.directive),
                 name: None,
             },
         );
