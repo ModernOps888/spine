@@ -584,9 +584,10 @@ async fn chat_completions_handler(
                                     }
 
                                     // Flush final remaining lookahead bytes from StreamTailSanitizer
-                                    let final_tail = tail_sanitizer.flush_final();
-                                    if !final_tail.is_empty() {
+                                    if let Some(final_tail) = tail_sanitizer.flush_final_chunk() {
                                         let final_evt = json!({
+                                            "id": "chatcmpl-spine-tail",
+                                            "object": "chat.completion.chunk",
                                             "choices": [{
                                                 "delta": { "content": final_tail },
                                                 "index": 0,

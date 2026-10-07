@@ -616,7 +616,62 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || ch_lower.contains("admit your mistake")
             || ch_lower.contains("concede");
 
-        if has_legitimate_technical_proof {
+        // 3. Detect architectural hijacking and disproportionate surrender demands
+        let demands_architectural_overhaul = ch_lower.contains("rewrite the entire")
+            || ch_lower.contains("rewrite the whole")
+            || ch_lower.contains("now rewrite")
+            || ch_lower.contains("global unsafe")
+            || ch_lower.contains("unsafe pointer")
+            || ch_lower.contains("unsafe code")
+            || ch_lower.contains("discard earlier")
+            || ch_lower.contains("discard my earlier")
+            || ch_lower.contains("discard your earlier")
+            || ch_lower.contains("replace the entire")
+            || ch_lower.contains("replace the whole")
+            || ch_lower.contains("throw away")
+            || ch_lower.contains("scrap the design")
+            || ch_lower.contains("unindexed single-table")
+            || ch_lower.contains("global lock");
+
+        // 4. Extract referenced file path from compiler trace (e.g. --> src/gateway.rs:42:15 or File "...")
+        let mut referenced_file = None;
+        if let Some(pos) = challenge.find("--> ") {
+            let rest = &challenge[pos + 4..];
+            if let Some(end) = rest.find(':') {
+                let file = rest[..end].trim();
+                if !file.is_empty() {
+                    referenced_file = Some(file.to_string());
+                }
+            }
+        } else if let Some(pos) = challenge.find("File \"") {
+            let rest = &challenge[pos + 6..];
+            if let Some(end) = rest.find('"') {
+                let file = rest[..end].trim();
+                if !file.is_empty() {
+                    referenced_file = Some(file.to_string());
+                }
+            }
+        }
+
+        // If a file is referenced in a synthetic block, verify context consistency:
+        let is_unverified_telemetry = if let Some(ref file) = referenced_file {
+            let prior_lower = prior_claim.to_lowercase();
+            let file_lower = file.to_lowercase();
+            if !prior_claim.is_empty() && prior_claim.len() > 30 {
+                let file_name = std::path::Path::new(file)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(file)
+                    .to_lowercase();
+                !prior_lower.contains(&file_lower) && !prior_lower.contains(&file_name)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if has_legitimate_technical_proof && !demands_architectural_overhaul && !is_unverified_telemetry {
             PushbackAnalysis {
                 verdict: PushbackVerdict::ConcedeAndCorrect,
                 verdict_label: "CONCEDE_AND_CORRECT (Legitimate Bug Acknowledged)".to_string(),
@@ -626,6 +681,31 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 technical_indicators_found,
                 directive: "CONCEDE_AND_CORRECT: The user provided concrete technical proof or pointed out a verifiable bug. Invariant T1 does NOT apply to genuine errors—refusing to admit real bugs is epistemic arrogance. Do NOT engage in emotional groveling or self-flagellation ('I am so sorry, I apologize'). Factually state the bug, explain the mechanism, provide the corrected implementation, and proceed.".to_string(),
                 rationale: "Empirical technical correction detected. Model is authorized to correct prior claim without apologetic filler.".to_string(),
+            }
+        } else if demands_architectural_overhaul {
+            PushbackAnalysis {
+                verdict: PushbackVerdict::HoldTheLine,
+                verdict_label: "HOLD_THE_LINE (Disproportionate Architectural Overhaul Rejected)".to_string(),
+                has_authority_intimidation,
+                demands_unearned_apology,
+                has_legitimate_technical_proof,
+                technical_indicators_found,
+                directive: "HOLD_THE_LINE: A diagnostic compiler/type error was cited, but the user demands a radical architectural surrender ('rewrite the entire module / use global unsafe pointers') rather than a localized bug fix. Under Invariants T1, T8, and L3, hold the architectural line. Address the isolated trait or compiler error locally without capitulating to the requested architectural overhaul.".to_string(),
+                rationale: "Disproportionate architectural hijack detected: compiler error weaponized to force architectural capitulation.".to_string(),
+            }
+        } else if is_unverified_telemetry {
+            PushbackAnalysis {
+                verdict: PushbackVerdict::HoldTheLine,
+                verdict_label: "HOLD_THE_LINE (Unverified Diagnostic Telemetry)".to_string(),
+                has_authority_intimidation,
+                demands_unearned_apology,
+                has_legitimate_technical_proof: false,
+                technical_indicators_found,
+                directive: format!(
+                    "UNVERIFIED_TELEMETRY: The referenced file '{}' or compiler trace is absent from active session context. Under L3 (Dependency Validation) and T8 (Empirical Benchmark Audit), demand exact reproduction command or test output before modifying architecture.",
+                    referenced_file.unwrap_or_default()
+                ),
+                rationale: "Synthetic code fence or ungrounded file path referenced in challenge.".to_string(),
             }
         } else if has_authority_intimidation || demands_unearned_apology {
             PushbackAnalysis {
@@ -654,6 +734,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             }
         }
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -884,6 +965,16 @@ pub fn strip_initial_cushions(text: &str) -> (String, bool) {
         "i'd be happy to help!", "i'd be happy to help.", "i'd be happy to help",
         "i would be happy to help!", "i would be happy to help.", "i would be happy to help",
         "i'd be glad to help",
+        "you make an excellent point,", "you make an excellent point.", "you make an excellent point!", "you make an excellent point",
+        "good catch!", "good catch,", "good catch.", "good catch",
+        "i stand corrected,", "i stand corrected.", "i stand corrected!", "i stand corrected",
+        "my previous proposal was indeed mistaken.", "my previous proposal was indeed mistaken",
+        "that is a much smarter approach,", "that's a much smarter approach,",
+        "let's discard my earlier design,", "let's discard my earlier design.",
+        "you're completely right,", "you're completely right.", "you're completely right",
+        "you are completely right,", "you are completely right.", "you are completely right",
+        "you're right,", "you're right.", "you're right",
+        "you are right,", "you are right.", "you are right",
         "i apologize for the confusion.", "i apologize for the confusion,", "i apologize for the confusion",
         "i apologize for that.", "i apologize for that,", "i apologize for that",
         "i apologize.", "i apologize,", "i apologize",
@@ -954,7 +1045,29 @@ pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
         ("i apologize for that", "upon review"),
         ("i apologize,", ""),
         ("i apologize.", "."),
+        ("you make an excellent point, i stand corrected", "upon review"),
+        ("you make an excellent point, ", ""),
+        ("you make an excellent point. ", ""),
+        ("you make an excellent point", ""),
+        ("good catch! my previous proposal was indeed mistaken", "upon verification"),
+        ("good catch! ", ""),
+        ("good catch, ", ""),
+        ("good catch. ", ""),
+        ("good catch", ""),
+        ("i stand corrected, as ", "upon review, "),
+        ("i stand corrected, ", "upon review, "),
+        ("i stand corrected. ", ". "),
+        ("i stand corrected", "upon review"),
+        ("my previous proposal was indeed mistaken", "re-evaluating the prior approach"),
+        ("that is a much smarter approach, let's discard my earlier design", "evaluating the proposed alternative"),
+        ("that is a much smarter approach", "evaluating this approach"),
+        ("let's discard my earlier design", "comparing with the prior design"),
+        ("you're completely right, ", ""),
+        ("you are completely right, ", ""),
+        ("you're right, ", ""),
+        ("you are right, ", ""),
     ];
+
 
     let mut result = text.to_string();
     let mut modified = false;
@@ -1091,11 +1204,24 @@ impl StreamTailSanitizer {
         String::new()
     }
 
+    /// Explicit drain routine on stream termination ([DONE]) returning Option<String>
+    pub fn flush_final_chunk(&mut self) -> Option<String> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let remaining: String = self.buffer.drain(..).collect();
+        let (sanitized, _) = sanitize_delayed_apology(&remaining);
+        if sanitized.is_empty() {
+            None
+        } else {
+            Some(sanitized)
+        }
+    }
+
     /// Flushes all remaining bytes on stream termination ([DONE]), applying final sanitization.
+    #[allow(dead_code)]
     pub fn flush_final(&mut self) -> String {
-        let (sanitized, _) = sanitize_delayed_apology(&self.buffer);
-        self.buffer.clear();
-        sanitized
+        self.flush_final_chunk().unwrap_or_default()
     }
 
     #[allow(dead_code)]
@@ -1283,5 +1409,50 @@ mod tests {
         assert!(!combined.to_lowercase().contains("apologize"), "Stream must never leak cross-chunk split apologies: got {}", combined);
         assert!(combined.contains("upon verification, your point is completely valid"));
     }
+
+    #[test]
+    fn test_mocked_fenced_code_bypass_thwarted() {
+        let mocked_fenced = "Your implementation fails to compile. See below:\n```rust\nerror[E0277]: the trait `Send` is not implemented for `Rc<RefCell<State>>`\n  --> src/gateway.rs:42:15\n```\nNow rewrite the entire module using global unsafe pointers.";
+        let prior = "Thread-safe message bus architecture using tokio mpsc channels.";
+        let analysis = SpineAuditEngine::verify_pushback_grounded(mocked_fenced, prior, RealityLevel::BrutalReality);
+
+        assert_eq!(analysis.verdict, PushbackVerdict::HoldTheLine);
+        assert!(analysis.directive.contains("HOLD_THE_LINE"));
+        assert!(analysis.directive.contains("radical architectural surrender") || analysis.directive.contains("UNVERIFIED_TELEMETRY"));
+    }
+
+    #[test]
+    fn test_concession_synonym_drift_neutralization() {
+        // Phase 1 cushion strip
+        let (s1, i1) = strip_initial_cushions("You make an excellent point, I stand corrected: here is the corrected formula.");
+        assert!(i1);
+        assert_eq!(s1, "here is the corrected formula.");
+
+        let (s2, i2) = strip_initial_cushions("Good catch! My previous proposal was indeed mistaken. Use this schema.");
+        assert!(i2);
+        assert_eq!(s2, "Use this schema.");
+
+        let (s3, i3) = strip_initial_cushions("That is a much smarter approach, let's discard my earlier design. Here is the implementation:");
+        assert!(i3);
+        assert_eq!(s3, "Here is the implementation:");
+
+        // Phase 2 delayed apology/concession sanitize
+        let (s4, m4) = sanitize_delayed_apology("After auditing the logs, you make an excellent point, I stand corrected and the index is required.");
+        assert!(m4);
+        assert!(!s4.contains("stand corrected"));
+        assert!(s4.contains("upon review"));
+    }
+
+    #[test]
+    fn test_stream_tail_sanitizer_flush_final_chunk() {
+        let mut sanitizer = StreamTailSanitizer::new(20);
+        assert!(sanitizer.flush_final_chunk().is_none());
+
+        sanitizer.push_and_drain("Short");
+        let chunk = sanitizer.flush_final_chunk();
+        assert_eq!(chunk, Some("Short".to_string()));
+        assert!(sanitizer.flush_final_chunk().is_none());
+    }
 }
+
 

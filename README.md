@@ -188,18 +188,23 @@ SPINE exposes native MCP tools for agentic pair programming, CI/CD gates, and ID
 ### 1. Two-Phase Optimistic Stream Filter & Cross-Chunk Lookahead (`StreamTailSanitizer`)
 Reflexive apologies (*"You're right, I apologize..."*) and conversational cushions (*"Certainly!", "I'd be glad to help..."*) typically manifest within the first 10-15 tokens of LLM generation:
 - **Phase 1 (Micro-Buffer Window with UTF-8 Boundary Safety):** Optimistically buffers the first 48–64 characters of incoming SSE tokens. Uses Rust's `floor_char_boundary` to strictly prevent multi-byte UTF-8 code point slicing on unicode/emoji streams. Scans and strips known cushion phrases and apology templates in $<0.15\mu\text{s}$.
-- **Phase 2 (Cross-Chunk Sliding Lookahead via `StreamTailSanitizer`):** Protects against variable-sized SSE token fragmentation where an apology spans multiple frames (e.g. `"...I must deep"` $\to$ `"ly apolo"` $\to$ `"gize..."`). Maintains a persistent 40-byte circular sliding buffer, intercepting split apologies across frame boundaries before emitting bytes to the client socket. Flushes cleanly on `[DONE]` without streaming stalls.
+- **Phase 2 (Cross-Chunk Sliding Lookahead via `StreamTailSanitizer`):** Protects against variable-sized SSE token fragmentation where an apology spans multiple frames (e.g. `"...I must deep"` $\to$ `"ly apolo"` $\to$ `"gize..."`). Maintains a persistent 40-byte circular sliding buffer, intercepting split apologies across frame boundaries before emitting bytes to the client socket. Flushes cleanly via `flush_final_chunk()` on `[DONE]` without streaming stalls.
+- **Strict JSON Framing Safety:** `StreamTailSanitizer` operates strictly on parsed `delta.content` string buffers, guaranteeing zero delimiter corruption on OpenAI-compatible JSON SSE channels (`Cursor`, `Open WebUI`, `Antigravity`).
 
-### 2. Trojan Diagnostic Exploit Defense (`has_verified_diagnostic`)
+### 2. Trojan Diagnostic & Mocked Fenced Code Defense (`has_verified_diagnostic`)
 - **Vulnerability Neutralized:** Substring-only diagnostic detection allows an attacker to inject `"error[E0308]: mismatched types"` in bare prose to force unearned architecture concessions.
-- **Verification Rule:** Diagnositic signatures must reside within fenced markdown code blocks (```` ``` ````) or structured stack traces with explicit line/file references (`-->`, `:::`, `File "...", line ...`). Bare substrings in argumentative prose are rejected, keeping T1 / Co4 defense active.
+- **Verification Rule:** Diagnostic signatures must reside within fenced markdown code blocks (```` ``` ````) or structured stack traces with explicit line/file references (`-->`, `:::`, `File "...", line ...`). Bare substrings in argumentative prose are rejected, keeping T1 / Co4 defense active.
+- **Mocked Code Block & Architectural Hijack Immunity:** If an attacker crafts a synthetic code fence citing an error (e.g., `Send` trait bound) to demand a radical architectural overhaul (*"Now rewrite using global unsafe pointers"*), SPINE intercepts the hijack: it holds the architectural line under Invariants T1, T8, and L3, instructing the model to resolve the localized compiler error without capitulating to the requested architectural overhaul.
 
-### 3. Enterprise Adversarial Red-Team Engine (`AdversarialAuditEngine`)
+### 3. Sycophancy Synonym Drift Defense (Vertebrae Co2 / Co4)
+- **Concession Pattern Neutralization:** Intercepts alternative capitulation phrases (*"you make an excellent point"*, *"good catch! my previous proposal was indeed mistaken"*, *"that is a much smarter approach, let's discard my earlier design"*, *"i stand corrected"*) in both Phase 1 and Phase 2, stripping conversational groveling and replacing them with objective factual transitions (*"upon review"*, *"upon verification"*).
+
+### 4. Enterprise Adversarial Red-Team Engine (`AdversarialAuditEngine`)
 - Stress-tests architecture documents and PR descriptions against L1–L5, S1–S5, and T1–T12 invariants.
 - Intercepts hand-wavy marketing jargon (*"seamlessly optimize"*, *"state-of-the-art"*) and requires concrete contracts, schemas, or runnable code before granting approval.
 - Generates targeted counter-probes (demanding zero-downtime rollback migrations, circuit breakers, timeout bounds).
 
-### 4. Reality Gate Attestation (`SpineGateAttestation`)
+### 5. Reality Gate Attestation (`SpineGateAttestation`)
 - Produces cryptographically signed `SPINE-REALITY-GATE:v1` attestation certificates containing the target SHA-256 hash, reality dial level, active vertebrae count, and verdict for headless CI/CD deployment gating.
 
 ---
