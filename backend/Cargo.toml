@@ -17,3 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 bytes = "1.6"
 async-stream = "0.3"
+sha2 = "0.10"

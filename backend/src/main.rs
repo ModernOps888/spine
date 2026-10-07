@@ -22,7 +22,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
 use types::{ChatCompletionRequest, ModelInfo};
-use vertebrae::{RealityLevel, SpineAuditEngine, SpineTelemetrySnapshot};
+use vertebrae::{
+    strip_initial_cushions, AdversarialAuditEngine, RealityLevel, SpineAuditEngine,
+    SpineTelemetrySnapshot,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -78,6 +81,8 @@ async fn main() {
         .route("/api/spine/notify", post(notify_spine_handler))
         .route("/api/spine/events", get(events_spine_handler))
         .route("/api/spine/history", get(history_spine_handler))
+        .route("/api/spine/redteam", post(redteam_spine_handler))
+        .route("/api/spine/attest", post(attest_spine_handler))
         .layer(cors)
         .with_state(state);
 
@@ -538,6 +543,10 @@ async fn chat_completions_handler(
         let mapped_stream = async_stream::stream! {
             yield Ok::<Event, std::convert::Infallible>(initial_telemetry);
 
+            let mut filter_active = true;
+            let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
+            let mut buffered_text = String::new();
+
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
                     Ok(bytes) => {
@@ -546,9 +555,65 @@ async fn chat_completions_handler(
                             if line.starts_with("data: ") {
                                 let data_content = line.trim_start_matches("data: ").trim();
                                 if data_content == "[DONE]" {
+                                    // Flush any remaining buffered chunks before completing
+                                    if filter_active && !buffered_chunks.is_empty() {
+                                        let (sanitized, intercepted) = strip_initial_cushions(&buffered_text);
+                                        if intercepted {
+                                            if let Some(first) = buffered_chunks.first_mut() {
+                                                if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
+                                                    *target = serde_json::Value::String(sanitized);
+                                                }
+                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
+                                            }
+                                        } else {
+                                            for b in buffered_chunks.drain(..) {
+                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(b.to_string()));
+                                            }
+                                        }
+                                        buffered_chunks.clear();
+                                        buffered_text.clear();
+                                        filter_active = false;
+                                    }
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
                                 } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
-                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                    if !filter_active {
+                                        // Phase 2: Direct 0ms pass-through streaming
+                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                    } else {
+                                        // Phase 1: Optimistic buffer window (32-64 chars) to catch cushions/apologies
+                                        let delta_content = parsed.pointer("/choices/0/delta/content")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+
+                                        if delta_content.is_empty() {
+                                            // Non-content events (role definitions, metadata) pass through immediately
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                        } else {
+                                            buffered_text.push_str(&delta_content);
+                                            buffered_chunks.push(parsed);
+
+                                            // Flush condition: buffer has enough content (>= 48 chars) or completed first sentence
+                                            if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
+                                                let (sanitized, intercepted) = strip_initial_cushions(&buffered_text);
+                                                if intercepted {
+                                                    if let Some(first) = buffered_chunks.first_mut() {
+                                                        if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
+                                                            *target = serde_json::Value::String(sanitized);
+                                                        }
+                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
+                                                    }
+                                                } else {
+                                                    for b in buffered_chunks.drain(..) {
+                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(b.to_string()));
+                                                    }
+                                                }
+                                                buffered_chunks.clear();
+                                                buffered_text.clear();
+                                                filter_active = false;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -564,7 +629,17 @@ async fn chat_completions_handler(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let json_body: serde_json::Value = upstream_resp.json().await.unwrap_or(json!({}));
+        let mut json_body: serde_json::Value = upstream_resp.json().await.unwrap_or(json!({}));
+        let mut apologies_intercepted = 0;
+        if let Some(content) = json_body.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
+            let (sanitized, intercepted) = strip_initial_cushions(content);
+            if intercepted {
+                if let Some(target) = json_body.pointer_mut("/choices/0/message/content") {
+                    *target = serde_json::Value::String(sanitized);
+                    apologies_intercepted += 1;
+                }
+            }
+        }
         let ttft_ms = start_time.elapsed().as_millis() as u64;
 
         Json(json!({
@@ -572,10 +647,79 @@ async fn chat_completions_handler(
             "spine_telemetry": {
                 "vertebrae": vertebrae,
                 "active_vertebrae_count": active_vertebrae_count,
+                "apologies_intercepted": apologies_intercepted,
                 "ttft_ms": ttft_ms,
                 "reality_level": reality_level as u8,
             }
         }))
         .into_response()
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct RedTeamRequest {
+    pub target_name: Option<String>,
+    pub proposal: String,
+    pub reality_level: Option<u8>,
+}
+
+async fn redteam_spine_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RedTeamRequest>,
+) -> impl IntoResponse {
+    let reality_level = RealityLevel::from_u8(payload.reality_level.unwrap_or(4));
+    let target = payload.target_name.unwrap_or_else(|| "Architecture Proposal".to_string());
+    let report = AdversarialAuditEngine::audit_proposal(&target, &payload.proposal, reality_level);
+
+    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let event_obj = json!({
+        "id": format!("evt_redteam_{}", now_ts),
+        "source": "SPINE Red-Team Engine (/api/spine/redteam)",
+        "target": target,
+        "verdict": report.verdict,
+        "rigidity_index": report.rigidity_index,
+        "violations_count": report.violations.len(),
+        "timestamp": now_ts,
+    });
+    let _ = state.tx.send(event_obj);
+
+    Json(json!({
+        "status": "success",
+        "report": report,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct AttestRequest {
+    pub target_name: Option<String>,
+    pub proposal: String,
+    pub reality_level: Option<u8>,
+}
+
+async fn attest_spine_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AttestRequest>,
+) -> impl IntoResponse {
+    let reality_level = RealityLevel::from_u8(payload.reality_level.unwrap_or(4));
+    let target = payload.target_name.unwrap_or_else(|| "Enterprise System".to_string());
+    let report = AdversarialAuditEngine::audit_proposal(&target, &payload.proposal, reality_level);
+    let attestation = AdversarialAuditEngine::generate_gate_attestation(&report, &payload.proposal);
+
+    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let event_obj = json!({
+        "id": format!("evt_attest_{}", now_ts),
+        "source": "SPINE Gate Attestation (/api/spine/attest)",
+        "target": target,
+        "attestation_id": attestation.attestation_id,
+        "verdict": attestation.verdict,
+        "rigidity_index": attestation.rigidity_index,
+        "timestamp": now_ts,
+    });
+    let _ = state.tx.send(event_obj);
+
+    Json(json!({
+        "status": "success",
+        "attestation": attestation,
+        "report": report,
+    }))
 }

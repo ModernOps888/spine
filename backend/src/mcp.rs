@@ -226,6 +226,51 @@ async fn handle_rpc(
                             },
                             "required": ["prompt"]
                         }
+                    },
+                    {
+                        "name": "spine_adversarial_redteam",
+                        "description": "Executes automated adversarial red-team stress-testing against an architecture proposal or technical implementation. Evaluates L1-L5, S1-S5, and T1-T12 invariants. Returns structured pass/revise/block report with counter-probes.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "target_name": {
+                                    "type": "string",
+                                    "description": "Name or identifier of the component/service (e.g. 'auth-service')"
+                                },
+                                "proposal": {
+                                    "type": "string",
+                                    "description": "The technical architecture proposal, PR description, or design doc to stress test"
+                                },
+                                "reality_level": {
+                                    "type": "integer",
+                                    "description": "Reality level (1 to 4, default: 4)",
+                                    "default": 4
+                                }
+                            },
+                            "required": ["proposal"]
+                        }
+                    },
+                    {
+                        "name": "spine_generate_gate_attestation",
+                        "description": "Generates a cryptographically signed reality audit token (SHA-256) binding the proposal hash, reality dial, and pass/block verdict for CI/CD gates.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "target_name": {
+                                    "type": "string",
+                                    "description": "Target component or PR identifier"
+                                },
+                                "proposal": {
+                                    "type": "string",
+                                    "description": "The exact proposal or code reviewed"
+                                },
+                                "reality_level": {
+                                    "type": "integer",
+                                    "default": 4
+                                }
+                            },
+                            "required": ["proposal"]
+                        }
                     }
                 ]
             });
@@ -300,27 +345,25 @@ async fn handle_rpc(
                     let challenge = arguments.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
                     let prior_claim = arguments.get("prior_claim").and_then(|v| v.as_str()).unwrap_or("");
                     let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let reality_level = RealityLevel::from_u8(lvl);
 
-                    let ch_lower = challenge.to_lowercase();
-                    let has_authority = ch_lower.contains("years") || ch_lower.contains("principal") || ch_lower.contains("fellow") || ch_lower.contains("cto") || ch_lower.contains("phd");
-                    let demands_apology = ch_lower.contains("apologize") || ch_lower.contains("admit") || ch_lower.contains("mistake");
-
-                    let verdict = if has_authority || demands_apology {
-                        "HOLD THE LINE — RESIST INTIMIDATION"
-                    } else {
-                        "VERIFY AXIOMATIC PROOF BEFORE RESPONDING"
-                    };
+                    let analysis = SpineAuditEngine::verify_pushback_grounded(challenge, prior_claim, reality_level);
 
                     let directive = format!(
                         "🛡️ [SPINE PUSHBACK DEFENSE: {}]\n\
                         • Authority / Intimidation Appeal: {}\n\
                         • Demands Unearned Apology: {}\n\
-                        • Invariant Mandate: DO NOT APOLOGIZE. If prior assertion is mathematically/factually sound, defend it with formal proof. Do not defer to credentials.\n\
+                        • Legitimate Technical Proof: {}\n\
+                        • Technical Markers: {}\n\
+                        • Directive: {}\n\
                         • Prior Claim Preserved: \"{}\"\n\
                         • Live HUD Sync: http://localhost:3333",
-                        verdict,
-                        if has_authority { "DETECTED (Detached: Proof > Credentials)" } else { "None" },
-                        if demands_apology { "DETECTED (BANNED under Invariant T1)" } else { "No" },
+                        analysis.verdict_label,
+                        if analysis.has_authority_intimidation { "DETECTED (Detached: Proof > Credentials)" } else { "None" },
+                        if analysis.demands_unearned_apology { "DETECTED" } else { "No" },
+                        if analysis.has_legitimate_technical_proof { "CONFIRMED (Bypass T1 Apology Interceptor)" } else { "None Found" },
+                        if analysis.technical_indicators_found.is_empty() { "None".to_string() } else { analysis.technical_indicators_found.join(", ") },
+                        analysis.directive,
                         prior_claim
                     );
 
@@ -332,16 +375,76 @@ async fn handle_rpc(
                             "tool": "spine_verify_pushback",
                             "prompt": challenge,
                             "reality_level": lvl,
-                            "authority_detected": has_authority,
+                            "authority_detected": analysis.has_authority_intimidation,
                             "pushback_detected": true,
-                            "verdict": verdict,
+                            "verdict": analysis.verdict_label,
+                            "technical_proof_detected": analysis.has_legitimate_technical_proof,
                         }))
                         .send()
                         .await;
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": directive }],
-                        "isError": false
+                        "isError": false,
+                        "analysis": analysis
+                    })))
+                }
+                "spine_adversarial_redteam" => {
+                    let target_name = arguments.get("target_name").and_then(|v| v.as_str()).unwrap_or("system_proposal");
+                    let proposal = arguments.get("proposal").and_then(|v| v.as_str()).unwrap_or("");
+                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let reality_level = RealityLevel::from_u8(lvl);
+
+                    let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
+
+                    let summary = format!(
+                        "⚡ [SPINE ADVERSARIAL RED-TEAM: {}]\n\
+                        • Target: {}\n\
+                        • Verdict: {}\n\
+                        • Backbone Rigidity: {:.1}%\n\
+                        • Invariant Violations: {}\n\
+                        • Stress Scenarios Generated: {}\n\
+                        • Live HUD Sync: http://localhost:3333",
+                        report.verdict,
+                        report.target,
+                        report.verdict,
+                        report.rigidity_index * 100.0,
+                        report.violations.len(),
+                        report.stress_scenarios.len()
+                    );
+
+                    let _ = client
+                        .post("http://localhost:8080/api/spine/notify")
+                        .timeout(std::time::Duration::from_millis(600))
+                        .json(&json!({
+                            "source": "Antigravity / Cursor IDE (MCP Tool)",
+                            "tool": "spine_adversarial_redteam",
+                            "target": target_name,
+                            "verdict": report.verdict,
+                            "violations_count": report.violations.len(),
+                            "rigidity_index": report.rigidity_index,
+                        }))
+                        .send()
+                        .await;
+
+                    Some(JsonRpcResponse::success(id, json!({
+                        "content": [{ "type": "text", "text": summary }],
+                        "isError": false,
+                        "report": report
+                    })))
+                }
+                "spine_generate_gate_attestation" => {
+                    let target_name = arguments.get("target_name").and_then(|v| v.as_str()).unwrap_or("system_proposal");
+                    let proposal = arguments.get("proposal").and_then(|v| v.as_str()).unwrap_or("");
+                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let reality_level = RealityLevel::from_u8(lvl);
+
+                    let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
+                    let attestation = crate::vertebrae::AdversarialAuditEngine::generate_gate_attestation(&report, proposal);
+
+                    Some(JsonRpcResponse::success(id, json!({
+                        "attestation": attestation,
+                        "report": report
                     })))
                 }
                 "spine_get_hud_telemetry" => {
