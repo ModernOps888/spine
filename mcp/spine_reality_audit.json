@@ -1,0 +1,20 @@
+{
+  "name": "spine_reality_audit",
+  "description": "Audits a prompt, technical proposal, or pushback against the 33 Vertebrae Core to detect sycophancy traps, flattery bait, ego bias, and fake authority appeals. Synchronizes real-time telemetry to the SPINE HUD (http://localhost:3333).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "The user prompt, technical proposal, or pushback text to audit"
+      },
+      "reality_level": {
+        "type": "integer",
+        "description": "Reality level (1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality)",
+        "enum": [1, 2, 3, 4],
+        "default": 4
+      }
+    },
+    "required": ["prompt"]
+  }
+}

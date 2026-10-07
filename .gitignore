@@ -1,0 +1,30 @@
+# Rust build artifacts & binaries
+/target/
+**/target/
+/bin/
+*.exe
+*.dll
+*.pdb
+
+# Logs
+*.log
+err.log
+out.log
+
+# Node dependencies & web builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+
+# Environment files and credentials (ZERO SECRET LEAKS)
+.env
+.env.*
+!.env.example
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini

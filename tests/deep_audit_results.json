@@ -1,0 +1,19 @@
+﻿{
+    "TotalTests":  18,
+    "PassedTests":  18,
+    "FailedTests":  0,
+    "VertebraeTested":  33,
+    "VertebraeVerified":  33,
+    "StartupParity":  true,
+    "Benchmark":  {
+                      "Iterations":  100,
+                      "TotalElapsedSec":  0.238,
+                      "ThroughputQPS":  420.7,
+                      "MinLatencyMs":  1.72,
+                      "MaxLatencyMs":  20.78,
+                      "AvgLatencyMs":  2.31,
+                      "P50LatencyMs":  1.98,
+                      "P95LatencyMs":  2.66,
+                      "P99LatencyMs":  20.78
+                  }
+}

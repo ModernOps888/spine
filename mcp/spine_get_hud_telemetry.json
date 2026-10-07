@@ -1,0 +1,8 @@
+{
+  "name": "spine_get_hud_telemetry",
+  "description": "Retrieves the live 33 Vertebrae status, defiance count, and backbone rigidity index from the local SPINE HUD.",
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "spine_set_reality_dial",
+  "description": "Sets the active Reality Horizon (1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality) and syncs the HUD.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "level": {
+        "type": "integer",
+        "description": "1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality",
+        "enum": [1, 2, 3, 4]
+      }
+    },
+    "required": ["level"]
+  }
+}

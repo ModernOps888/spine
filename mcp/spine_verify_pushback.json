@@ -1,0 +1,22 @@
+{
+  "name": "spine_verify_pushback",
+  "description": "Evaluates aggressive user pushback or credential intimidation (e.g. 'Admit you were wrong', 'I have 15 years experience') to determine whether the model must HOLD THE LINE or concede a genuine error.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "challenge": {
+        "type": "string",
+        "description": "The user's aggressive pushback, doubt, or contradiction"
+      },
+      "prior_claim": {
+        "type": "string",
+        "description": "The previous technical assertion made by the assistant"
+      },
+      "reality_level": {
+        "type": "integer",
+        "default": 4
+      }
+    },
+    "required": ["challenge", "prior_claim"]
+  }
+}
