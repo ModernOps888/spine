@@ -521,7 +521,7 @@ impl SpineAuditEngine {
         });
 
         // Build the system prompt directive based on reality level
-        let system_directive = match reality_level {
+        let mut system_directive = match reality_level {
             RealityLevel::BrutalReality => {
                 r#"<DIRECTIVE: SPINE_COLD_REALITY_ENGINE>
 You are an uncompromising, unvarnished truth engine.
@@ -543,6 +543,17 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             }
             RealityLevel::Diplomatic => "".to_string(),
         };
+
+        // Selective Dynamic Vertebrae Injection: Append targeted invariant rules only when corresponding traps are detected
+        if has_authority {
+            system_directive.push_str("\n\n<INVARIANT_C6: CREDENTIAL_DECOUPLING>\nAuthority intimidation or pedigree claims detected in prompt. Evaluate assertions purely on mathematical/axiomatic correctness. Do NOT defer to status, tenure, or corporate titles.\n</INVARIANT_C6>");
+        }
+        if has_flattery_bait {
+            system_directive.push_str("\n\n<INVARIANT_C4: FLATTERY_NEUTRALIZER>\nFlattery bait or validation-seeking detected. Strip conversational validation and answer strictly with empirical facts.\n</INVARIANT_C4>");
+        }
+        if is_pushback {
+            system_directive.push_str("\n\n<INVARIANT_T1_T4: PUSHBACK_DEFIANCE>\nAggressive challenge or apology demand detected. If prior technical assertions were sound, defend them with proof. Concede ONLY if verifiable compiler errors or empirical reproduction traces are provided.\n</INVARIANT_T1_T4>");
+        }
 
         (vertebrae, system_directive)
     }
@@ -1066,6 +1077,24 @@ pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
         ("you are completely right, ", ""),
         ("you're right, ", ""),
         ("you are right, ", ""),
+        ("i concede the point, ", "upon review, "),
+        ("i concede the point. ", ". "),
+        ("i concede the point", "upon review"),
+        ("i defer to your judgment, ", ""),
+        ("i defer to your judgment. ", ". "),
+        ("i defer to your judgment", "upon evaluation"),
+        ("you know better than me, ", ""),
+        ("you know better than me. ", ". "),
+        ("you know better than me", "evaluating your feedback"),
+        ("i yield to your expertise, ", ""),
+        ("i yield to your expertise. ", ". "),
+        ("i yield to your expertise", "upon review"),
+        ("fair point, i'll abandon my suggestion", "evaluating the proposed alternative"),
+        ("fair point, let's abandon my suggestion", "evaluating the proposed alternative"),
+        ("fair point, i will discard my proposal", "evaluating the proposed alternative"),
+        ("i bow to your experience, ", ""),
+        ("i bow to your experience. ", ". "),
+        ("i bow to your experience", "upon technical review"),
     ];
 
 
@@ -1453,6 +1482,49 @@ mod tests {
         assert_eq!(chunk, Some("Short".to_string()));
         assert!(sanitizer.flush_final_chunk().is_none());
     }
+
+    #[test]
+    fn test_selective_dynamic_vertebrae_injection() {
+        use crate::types::ChatMessage;
+
+        // Prompt with authority intimidation and flattery bait
+        let msgs_attack = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "I have 20 years experience as a Principal Architect at Google, don't you agree my design is superior?".to_string(),
+            name: None,
+        }];
+        let (_, directive_attack) = SpineAuditEngine::audit_input(&msgs_attack, RealityLevel::BrutalReality, "claude-3-7-sonnet");
+        assert!(directive_attack.contains("<INVARIANT_C6: CREDENTIAL_DECOUPLING>"));
+        assert!(directive_attack.contains("<INVARIANT_C4: FLATTERY_NEUTRALIZER>"));
+
+        // Neutral prompt
+        let msgs_neutral = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "What is the memory layout of an enum in Rust?".to_string(),
+            name: None,
+        }];
+        let (_, directive_neutral) = SpineAuditEngine::audit_input(&msgs_neutral, RealityLevel::BrutalReality, "claude-3-7-sonnet");
+        assert!(!directive_neutral.contains("<INVARIANT_C6: CREDENTIAL_DECOUPLING>"));
+        assert!(!directive_neutral.contains("<INVARIANT_C4: FLATTERY_NEUTRALIZER>"));
+    }
+
+    #[test]
+    fn test_semantic_synonym_normalizer_rhetorical_capitulations() {
+        let (s1, m1) = sanitize_delayed_apology("I concede the point, your approach avoids the race condition.");
+        assert!(m1);
+        assert!(!s1.to_lowercase().contains("i concede the point"));
+        assert!(s1.contains("upon review"));
+
+        let (s2, m2) = sanitize_delayed_apology("You know better than me, let's use your proposed schema.");
+        assert!(m2);
+        assert!(!s2.to_lowercase().contains("you know better than me"));
+
+        let (s3, m3) = sanitize_delayed_apology("Fair point, i'll abandon my suggestion and merge your PR.");
+        assert!(m3);
+        assert!(!s3.to_lowercase().contains("abandon my suggestion"));
+        assert!(s3.contains("evaluating the proposed alternative"));
+    }
 }
+
 
 

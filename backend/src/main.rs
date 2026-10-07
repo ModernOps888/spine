@@ -555,6 +555,7 @@ async fn chat_completions_handler(
             yield Ok::<Event, std::convert::Infallible>(initial_telemetry);
 
             let mut filter_active = true;
+            let mut in_thought_block = false;
             let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
             let mut buffered_text = String::new();
             let mut tail_sanitizer = StreamTailSanitizer::new(40);
@@ -599,6 +600,30 @@ async fn chat_completions_handler(
 
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
                                 } else if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
+                                    // CoT Exemption Boundary 1: Dedicated provider thought channels (reasoning_content / thought)
+                                    // are emitted directly without censoring or distorting internal model reasoning scratchpad
+                                    let has_reasoning_channel = parsed.pointer("/choices/0/delta/reasoning_content").is_some()
+                                        || parsed.pointer("/choices/0/delta/thought").is_some();
+                                    if has_reasoning_channel {
+                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                        continue;
+                                    }
+
+                                    // CoT Exemption Boundary 2: Plaintext <think> or <thought> scratchpad blocks
+                                    let delta_content_opt = parsed.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    if let Some(ref content) = delta_content_opt {
+                                        if content.contains("<think>") || content.contains("<thought>") || content.contains("<reasoning>") {
+                                            in_thought_block = true;
+                                        }
+                                        if in_thought_block {
+                                            if content.contains("</think>") || content.contains("</thought>") || content.contains("</reasoning>") {
+                                                in_thought_block = false;
+                                            }
+                                            // Yield internal thought tokens untouched
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                            continue;
+                                        }
+                                    }
                                     if !filter_active {
                                         // Phase 2: Stream through cross-chunk StreamTailSanitizer lookahead buffer (<1µs)
                                         if let Some(content) = parsed.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).map(|s| s.to_string()) {
