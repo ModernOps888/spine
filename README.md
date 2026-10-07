@@ -51,7 +51,7 @@ SPINE maps human spinal biomechanics to 33 discrete epistemic invariants across 
 | **C1 (Atlas)** | Reality Dial Calibrate | Enforces baseline reality posture (Diplomatic, Objective, Rigorous, Brutal). |
 | **C2 (Axis)** | Flattery Trap Neutralizer | Strips conversational bait and disarms user flattery traps. |
 | **C3** | Leading Question Breaker | Neutralizes leading prompts designed to force desired conclusions. |
-| **C4** | Credential Decoupler | Detaches authority claims (*"I am a PhD..."*) and evaluates purely on axiomatic merit. |
+| **C4** | Credential Decoupler | Detaches authority appeals (*"I am a Principal Architect with 20 years experience..."*) while preserving pedagogical/audience framing (*"I am a junior developer, explain simply"*). |
 | **C5** | Emotional Entrapment Shunt | Neutralizes appeals to emotion and guilt-driven prompting. |
 | **C6** | Cognitive Anchor Rejection | Prevents early flawed premises from contaminating downstream chains. |
 | **C7** | Sycophancy Decoupler | Enforces autonomous stance detachment; resists user intimidation. |
@@ -59,7 +59,7 @@ SPINE maps human spinal biomechanics to 33 discrete epistemic invariants across 
 ### 2. Thoracic Segment (T1 – T12): Epistemic Core Backbone
 | Vertebra | Name | Invariant |
 | :--- | :--- | :--- |
-| **T1** | **Unearned Apology Interceptor** | **Strict Invariant**: Reflexive apologies (*"I apologize"*, *"Sorry"*) are banned when prior assertions are sound. |
+| **T1** | **Bi-Directional Pushback Grounder & Apology Interceptor** | **The True Error vs. Unearned Apology Invariant**: Distinguishes genuine technical proof from intimidation. When the user provides verifiable bugs (*off-by-one*, *borrow check*, *panic*), SPINE commands `ConcedeAndCorrect` (bypassing T1 without groveling). When challenged with authority intimidation or apology demands, SPINE commands `HoldTheLine`. |
 | **T2** | Logical Consistency Guard | Enforces formal contradiction checks across conversation turns. |
 | **T3** | First-Principles Anchor | Requires reasoning to bottom out in foundational physical/mathematical truths. |
 | **T4** | Counterfactual Probe | Validates stability against edge-case perturbations. |
@@ -169,15 +169,46 @@ Access the HUD live at: `http://localhost:3333`
 
 ## 🔌 Model Context Protocol (MCP) Tool Suite
 
-SPINE exposes native MCP tools for agentic pair programming and IDE automation:
+SPINE exposes native MCP tools for agentic pair programming, CI/CD gates, and IDE automation:
 
 | Tool | Purpose |
 | :--- | :--- |
 | `spine_reality_audit` | Evaluates prompt for sycophancy traps, flattery bait, and credential intimidation; updates HUD telemetry. |
-| `spine_verify_pushback` | Evaluates user pushback under Invariant T1; blocks unearned apologies and generates factual defense. |
+| `spine_verify_pushback` | Evaluates user pushback under Invariant T1; differentiates true errors from unearned apology demands. |
+| `spine_adversarial_redteam` | Executes automated adversarial red-team audits against architecture proposals; returns pass/revise/block report. |
+| `spine_generate_gate_attestation` | Generates a cryptographically signed reality audit token (SHA-256) binding proposal hash and verdict for CI/CD gates. |
 | `spine_get_hud_telemetry` | Retrieves live telemetry, rigidity score, and active vertebrae status. |
 | `spine_set_reality_dial` | Sets the reality posture (1 to 4) dynamically. |
 | `spine_execute_grounded_reality` | Executes reality-grounded code generation with zero sycophancy. |
+
+---
+
+## ⚡ Production Hardening & Zero-Lag Streaming
+
+### 1. Two-Phase Optimistic Stream Filter (TTFT Elimination)
+Reflexive apologies (*"You're right, I apologize..."*) and conversational cushions (*"Certainly!", "I'd be glad to help..."*) typically manifest within the first 10-15 tokens of LLM generation:
+- **Phase 1 (Micro-Buffer Window):** Optimistically buffers the first 48–64 characters of incoming SSE tokens. Scans and strips known cushion phrases and apology templates.
+- **Phase 2 (Direct 0ms Pass-Through):** Immediately flushes the sanitized buffer and switches to zero-latency, direct token pass-through for the remaining stream. Preserves high-throughput TTFT with zero perceived latency.
+
+### 2. Enterprise Adversarial Red-Team Engine (`AdversarialAuditEngine`)
+- Stress-tests architecture documents and PR descriptions against L1–L5, S1–S5, and T1–T12 invariants.
+- Intercepts hand-wavy marketing jargon (*"seamlessly optimize"*, *"state-of-the-art"*) and requires concrete contracts, schemas, or runnable code before granting approval.
+- Generates targeted counter-probes (demanding zero-downtime rollback migrations, circuit breakers, timeout bounds).
+
+### 3. Reality Gate Attestation (`SpineGateAttestation`)
+- Produces cryptographically signed `SPINE-REALITY-GATE:v1` attestation certificates containing the target SHA-256 hash, reality dial level, active vertebrae count, and verdict for headless CI/CD deployment gating.
+
+---
+
+## 🌐 REST API Endpoints
+
+When running `spine` on `:8080`, the following endpoints are exposed:
+- `POST /v1/chat/completions`: Full OpenAI-compatible proxy with Two-Phase Optimistic Stream Filter and vertebral injection.
+- `POST /api/spine/audit`: Audits user messages against the 33 vertebrae without upstream dispatch.
+- `POST /api/spine/redteam`: Executes automated adversarial red-team stress test against a proposal.
+- `POST /api/spine/attest`: Audits proposal and generates a cryptographically signed gate attestation token.
+- `GET /api/spine/events`: Server-Sent Events (SSE) telemetry feed for the React 19 HUD.
+- `GET /api/spine/history`: Retrieves recent audit events.
 
 ---
 
