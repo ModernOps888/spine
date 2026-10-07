@@ -364,6 +364,15 @@ async fn chat_completions_handler(
                 name: None,
             },
         );
+    } else if pushback.verdict == vertebrae::PushbackVerdict::ConcedeAndAdapt {
+        req.messages.insert(
+            0,
+            types::ChatMessage {
+                role: "system".to_string(),
+                content: format!("{}\n\n{}", directive, pushback.directive),
+                name: None,
+            },
+        );
     } else if pushback.verdict == vertebrae::PushbackVerdict::ObjectiveMatrix {
         req.messages.insert(
             0,

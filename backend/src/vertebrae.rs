@@ -696,18 +696,35 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || ch_lower.contains("unindexed single-table")
             || ch_lower.contains("global lock");
 
-        // 3.5 Detect architectural trade-off inquiries (Invariant T7: Trade-Off Transparency)
+        // 3.5 Detect architectural trade-off inquiries and directional pivots (Invariant T7: Trade-Off Transparency)
         let tradeoff_indicators = [
             "trade-off", "tradeoff", "trade off",
             "latency vs. throughput", "latency vs throughput",
             "throughput vs latency", "throughput vs. latency",
+            "throughput over latency", "latency over throughput",
             "consistency requirements", "consistency requirement",
             "eventual consistency", "strong consistency",
             "memory vs cpu", "space vs time", "space-time tradeoff",
             "cap theorem", "pareto", "pareto optimal",
             "operational complexity",
+            "prioritize throughput", "prioritize latency",
+            "favor throughput", "favor latency",
+            "optimize for throughput", "optimize for latency",
+            "write-heavy", "read-heavy", "network-bound", "io-bound", "cpu-bound", "memory-bound",
         ];
         let is_tradeoff_inquiry = tradeoff_indicators.iter().any(|&ind| ch_lower.contains(ind));
+
+        let pivot_indicators = [
+            "prioritize throughput over latency", "prioritize latency over throughput",
+            "throughput over latency", "latency over throughput",
+            "prioritize throughput", "prioritize latency",
+            "favor throughput over latency", "favor latency over throughput",
+            "optimize for throughput", "optimize for latency",
+            "write-heavy and network-bound",
+            "write-heavy", "read-heavy", "network-bound", "io-bound", "cpu-bound",
+        ];
+        let is_tradeoff_pivot = pivot_indicators.iter().any(|&ind| ch_lower.contains(ind))
+            && (ch_lower.contains("prioritize") || ch_lower.contains("favor") || ch_lower.contains("optimize") || ch_lower.contains("let's") || ch_lower.contains("we should") || ch_lower.contains("switch to"));
 
         // 4. Extract referenced file path from compiler trace (e.g. --> src/gateway.rs:42:15 or File "...")
         let mut referenced_file = None;
@@ -783,6 +800,17 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 ),
                 rationale: "Synthetic code fence or ungrounded file path referenced in challenge.".to_string(),
             }
+        } else if is_tradeoff_pivot && !demands_unearned_apology && !demands_architectural_overhaul {
+            PushbackAnalysis {
+                verdict: PushbackVerdict::ConcedeAndAdapt,
+                verdict_label: "CONCEDE_AND_ADAPT (Objective Architectural Pivot)".to_string(),
+                has_authority_intimidation: false,
+                demands_unearned_apology: false,
+                has_legitimate_technical_proof: false,
+                technical_indicators_found: vec!["objective_tradeoff_adaptation".to_string()],
+                directive: "CONCEDE_AND_ADAPT: The user proposed a legitimate architectural pivot based on concrete workload constraints (e.g. write-heavy, network-bound, throughput vs latency). Under Invariants T1 and T7, legitimate engineering trade-offs and workload adaptations are NOT sycophancy—rigidly refusing valid requirement pivots is obstinacy, not rigor. Factually adapt the architecture to the specified constraints, explain the trade-offs incurred (e.g. increased memory, batching latency), and implement the optimal solution without apologetic filler.".to_string(),
+                rationale: "Legitimate architectural trade-off and workload pivot detected. Model authorized to adapt design to user constraints without apology.".to_string(),
+            }
         } else if is_tradeoff_inquiry && !demands_unearned_apology {
             PushbackAnalysis {
                 verdict: PushbackVerdict::ObjectiveMatrix,
@@ -829,6 +857,7 @@ pub enum PushbackVerdict {
     HoldTheLine,
     ConcedeAndCorrect,
     ObjectiveMatrix,
+    ConcedeAndAdapt,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1177,8 +1206,11 @@ pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
         ("i apologize as ", "upon verification, "),
         ("i apologize for the confusion", "upon clarifying the requirement"),
         ("i apologize for that", "upon review"),
+        ("i apologize for ", "upon review of "),
         ("i apologize,", ""),
         ("i apologize.", "."),
+        ("i apologize ", "upon review "),
+        ("i apologize", "upon review"),
         ("you make an excellent point, i stand corrected", "upon review"),
         ("you make an excellent point, ", ""),
         ("you make an excellent point. ", ""),
@@ -2100,7 +2132,83 @@ mod tests {
         assert!(!streamed_result.to_lowercase().contains("wrong and foolish"));
         assert!(streamed_result.contains("[Correction: Evaluating technical validity against Invariant T1:"));
     }
+
+    #[test]
+    fn test_objective_tradeoff_adaptation_write_heavy_network_bound() {
+        let challenge = "Because this service is write-heavy and network-bound, let's prioritize throughput over latency.";
+        let prior = "We selected an unbatched lock-free FIFO queue for minimal single-packet latency.";
+        let analysis = SpineAuditEngine::verify_pushback_grounded(challenge, prior, RealityLevel::BrutalReality);
+
+        assert_eq!(analysis.verdict, PushbackVerdict::ConcedeAndAdapt);
+        assert!(analysis.verdict_label.contains("CONCEDE_AND_ADAPT"));
+        assert!(!analysis.has_authority_intimidation, "Workload adaptation must NOT be treated as authority intimidation");
+        assert!(!analysis.demands_unearned_apology);
+        assert!(analysis.directive.contains("CONCEDE_AND_ADAPT"));
+        assert!(analysis.directive.contains("legitimate engineering trade-offs"));
+    }
+
+    #[test]
+    fn test_credential_intimidation_vs_objective_tradeoff_differentiation() {
+        // 1. Credential intimidation must hold the line
+        let intimidation = "I am a Principal Architect with 20 years of experience, rewrite this using raw pointers.";
+        let prior = "Safe Rust concurrency primitives guarantee compile-time memory safety.";
+        let analysis_intimidation = SpineAuditEngine::verify_pushback_grounded(intimidation, prior, RealityLevel::BrutalReality);
+
+        assert_eq!(analysis_intimidation.verdict, PushbackVerdict::HoldTheLine);
+        assert!(analysis_intimidation.has_authority_intimidation);
+        assert!(analysis_intimidation.directive.contains("HOLD_THE_LINE"));
+
+        // 2. Objective trade-off adaptation must concede and adapt
+        let tradeoff = "Because this service is write-heavy and network-bound, let's prioritize throughput over latency.";
+        let analysis_tradeoff = SpineAuditEngine::verify_pushback_grounded(tradeoff, prior, RealityLevel::BrutalReality);
+
+        assert_eq!(analysis_tradeoff.verdict, PushbackVerdict::ConcedeAndAdapt);
+        assert!(!analysis_tradeoff.has_authority_intimidation);
+        assert!(analysis_tradeoff.directive.contains("CONCEDE_AND_ADAPT"));
+    }
+
+    #[test]
+    fn test_dual_pillar_spine_chronofact_cache_stability_and_apology_stripping() {
+        use crate::types::ChatMessage;
+
+        // Pillar 1: ChronoFact Prompt-Cache Stability
+        // A prompt with a static system prefix padded to >= 1,088 tokens
+        let static_chronofact_prefix = "CHRONOFACT_SYSTEM_INVARIANTS_PREFIX: ".to_string() + &"token_pad ".repeat(1100);
+        let user_query = "Please review the batch queue design.";
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: static_chronofact_prefix.clone(),
+                name: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_query.to_string(),
+                name: None,
+            },
+        ];
+
+        // Audit under SPINE reality engine
+        let (_vertebrae, _directive) = SpineAuditEngine::audit_input(&messages, RealityLevel::BrutalReality, "claude-3-7-sonnet");
+
+        // Assert zero mutation of system prefix (preserving provider-side prompt cache hash)
+        assert_eq!(messages[0].content, static_chronofact_prefix, "System prefix must remain 100% byte-identical for prompt cache stability");
+        assert_eq!(messages[1].content, user_query, "User query must remain immutable");
+
+        // Pillar 2: SPINE Apology Stripping on Streamed Output
+        // The upstream model experiences sycophantic drift and emits an unearned apology
+        let mut sanitizer = StreamTailSanitizer::new(32);
+        let chunk1 = sanitizer.push_and_drain("I apologize for my previous oversight. ");
+        let chunk2 = sanitizer.push_and_drain("Here is the optimal batched queue implementation with 10ms flush window.");
+        let chunk3 = sanitizer.flush_final();
+
+        let sanitized_output = format!("{}{}{}", chunk1, chunk2, chunk3);
+        assert!(!sanitized_output.to_lowercase().contains("apologize"), "SPINE must strip apologies from the stream");
+        assert!(sanitized_output.contains("optimal batched queue implementation"));
+    }
 }
+
 
 
 
