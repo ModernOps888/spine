@@ -15,31 +15,33 @@ if (-not $Quiet) {
 $baseDir = if ($PSScriptRoot) { $PSScriptRoot } else { "." }
 $binDir = Join-Path $baseDir "bin"
 $binPath = Join-Path $binDir "spine.exe"
-$targetBin = Join-Path $baseDir "backend\target\debug\spine-gateway.exe"
 $releaseBin = Join-Path $baseDir "backend\target\release\spine-gateway.exe"
+$debugBin = Join-Path $baseDir "backend\target\debug\spine-gateway.exe"
 
 if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 
-# Resolve the best available binary
-if (Test-Path $targetBin) {
-    try {
-        Copy-Item $targetBin $binPath -Force -ErrorAction SilentlyContinue
-    } catch {}
-} elseif (Test-Path $releaseBin) {
+# Resolve the best available binary (release prioritized)
+if (Test-Path $releaseBin) {
     try {
         Copy-Item $releaseBin $binPath -Force -ErrorAction SilentlyContinue
     } catch {}
-} elseif (-not (Test-Path $binPath)) {
-    if (-not $Quiet) { Write-Host "Compiling SPINE backend binary..." -ForegroundColor Yellow }
-    cargo build --manifest-path (Join-Path $baseDir "backend\Cargo.toml")
+} elseif (Test-Path $binPath) {
+    # Existing bin\spine.exe is ready
+} elseif (Test-Path $debugBin) {
     try {
-        Copy-Item $targetBin $binPath -Force -ErrorAction SilentlyContinue
+        Copy-Item $debugBin $binPath -Force -ErrorAction SilentlyContinue
+    } catch {}
+} elseif (-not (Test-Path $binPath)) {
+    if (-not $Quiet) { Write-Host "Compiling SPINE backend binary (release)..." -ForegroundColor Yellow }
+    cargo build --release --manifest-path (Join-Path $baseDir "backend\Cargo.toml")
+    try {
+        Copy-Item $releaseBin $binPath -Force -ErrorAction SilentlyContinue
     } catch {}
 }
 
-$exeToRun = if (Test-Path $targetBin) { $targetBin } elseif (Test-Path $binPath) { $binPath } else { "spine.exe" }
+$exeToRun = if (Test-Path $releaseBin) { $releaseBin } elseif (Test-Path $binPath) { $binPath } elseif (Test-Path $debugBin) { $debugBin } else { "spine.exe" }
 
 # Ensure .env is available in root
 $backendEnv = Join-Path $baseDir "backend\.env"
