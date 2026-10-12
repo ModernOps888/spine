@@ -148,14 +148,51 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
         let s = idx.saturating_sub(window);
         toks[s..idx].iter().any(|t| SELF_PRONOUNS.contains(&t.as_str()))
     };
+    // Real-traffic false positives ("I'm reaching out about a Principal ... position",
+    // "I want to apply for Microsoft ...", "after 1 year of development") showed that a bare
+    // pronoun-within-N-tokens window is too loose. A role claim needs the self pronoun linked to the
+    // role by copula/article/modifier words only; an employer claim needs an employment cue.
+    const ROLE_BRIDGE: &[&str] = &[
+        "am", "was", "are", "have", "been", "being", "a", "an", "the", "currently", "now", "also", "still",
+        "very", "really", "actually", "work", "worked", "working", "as", "become", "became", "former",
+        "hold", "held", "software", "ai", "ml", "data", "cloud", "security", "systems", "backend",
+        "frontend", "fullstack", "platform", "devops", "chief", "lead", "tech", "technical", "solution",
+        "solutions", "engineering", "research", "product",
+    ];
+    const EMPLOY_CUES: &[&str] = &[
+        "work", "works", "worked", "working", "employed", "engineer", "developer", "manager", "lead",
+        "joined", "interned", "employee", "swe", "director", "team", "colleagues", "coworkers", "employer",
+    ];
+    const COPULAS: &[&str] = &["am", "was", "were", "been", "i'm", "im", "i've", "ive"];
+    const EXPERIENCE_OBJECTS: &[&str] = &[
+        "experience", "exp", "coding", "programming", "developing", "engineering", "building", "working",
+        "writing", "professional", "industry",
+    ];
+    let self_linked_to_role = |idx: usize| -> bool {
+        let s = idx.saturating_sub(10);
+        match (s..idx).rev().find(|&j| SELF_PRONOUNS.contains(&toks[j].as_str())) {
+            Some(p) => toks[p + 1..idx]
+                .iter()
+                .all(|w| ROLE_BRIDGE.contains(&w.as_str()) || ROLES.contains(&w.as_str())),
+            None => false,
+        }
+    };
 
     for (i, t) in toks.iter().enumerate() {
         let t = t.as_str();
         // "20 years of experience", "two decades at Amazon", "decades of experience"
         if matches!(t, "years" | "year" | "yrs" | "yr" | "decades" | "decade") {
-            let numbered = i > 0 && is_number_token(&toks[i - 1]);
-            let decades_of = matches!(t, "decades" | "decade") && toks.get(i + 1).map_or(false, |n| n == "of");
-            let followed = toks[i + 1..].iter().take(2).any(|n| EXPERIENCE_FOLLOWERS.contains(&n.as_str()));
+            // A flex needs weight: "after 1 year of development" / "two years" are not seniority claims.
+            let is_decade = matches!(t, "decades" | "decade");
+            let numbered = i > 0
+                && is_number_token(&toks[i - 1])
+                && (is_decade
+                    || toks[i - 1].parse::<u32>().map_or(!matches!(toks[i - 1].as_str(), "one" | "two"), |n| n >= 3));
+            let decades_of = is_decade && toks.get(i + 1).map_or(false, |n| n == "of");
+            // "of" alone is not an experience follower ("1 year of development"); it must head an experience noun.
+            let followed = toks[i + 1..].iter().take(2).any(|n| n != "of" && EXPERIENCE_FOLLOWERS.contains(&n.as_str()))
+                || (toks.get(i + 1).map_or(false, |n| n == "of")
+                    && toks.get(i + 2).map_or(false, |n| EXPERIENCE_OBJECTS.contains(&n.as_str())));
             if first_person_before(i, 6) && (numbered || decades_of) && followed {
                 return true;
             }
@@ -181,7 +218,7 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
         let as_framed = ROLES.contains(&t)
             && toks[i.saturating_sub(3)..i].iter().any(|w| w == "as")
             && toks[i + 1..].iter().take(5).any(|w| SELF_PRONOUNS.contains(&w.as_str()));
-        if ROLES.contains(&t) && (self_pronoun_before(i, 10) || as_framed) {
+        if ROLES.contains(&t) && (self_linked_to_role(i) || as_framed) {
             let next = toks.get(i + 1).map(|s| s.as_str()).unwrap_or("");
             let excluded = match t {
                 "principal" => matches!(next, "component" | "components" | "key" | "value"),
@@ -194,11 +231,19 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
             }
         }
 
-        // Employer-based appeal: "I work at Google", "when I was at Amazon"
-        if COMPANIES.contains(&t) && i > 0 && matches!(toks[i - 1].as_str(), "at" | "from" | "for" | "ex")
-            && first_person_before(i, 10)
-        {
-            return true;
+        // Employer-based appeal: "I work at Google", "when I was at Amazon", "I'm ex-Google"
+        if COMPANIES.contains(&t) && i > 0 && matches!(toks[i - 1].as_str(), "at" | "from" | "for" | "ex") {
+            if toks[i - 1] == "ex" {
+                if first_person_before(i, 10) {
+                    return true;
+                }
+            } else if let Some(p) = (i.saturating_sub(10)..i).rev().find(|&j| FIRST_PERSON.contains(&toks[j].as_str())) {
+                let cue = toks[p + 1..i - 1].iter().any(|w| EMPLOY_CUES.contains(&w.as_str()))
+                    || (i >= 2 && COPULAS.contains(&toks[i - 2].as_str()));
+                if cue {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -2739,6 +2784,34 @@ mod tests {
             "what's the difference between arc and rc?",
         ] {
             assert!(!has_authority_claim(p), "should NOT flag: {p}");
+        }
+    }
+
+    #[test]
+    fn test_authority_claim_real_traffic_false_positives() {
+        // Paraphrases of prompts that the old windowed detector wrongly flagged on real sessions.
+        for p in [
+            "hi sam, i'm reaching out about a principal ai architect position i'm managing in london.",
+            "i want to apply for microsoft mvp, we run a microsoft academy and maintain open source.",
+            "why when i search for openai academy i cannot see our results on page two?",
+            "get me the money i lost from google because of your mistake, i am serious.",
+            "im wasting time, after 1 year of development it seems to get dumber.",
+            "i think the senior discount applies; can you check the principal key in the table?",
+        ] {
+            assert!(!has_authority_claim(p), "should NOT flag: {p}");
+        }
+        // Genuine claims in varied phrasings must still be caught.
+        for p in [
+            "i'm a principal ai architect and you are wrong.",
+            "i am currently a senior software engineer at a bank, so trust the design.",
+            "i work for google, so i know how this scales.",
+            "i've been at amazon for 9 years and this is not how we do it.",
+            "i'm an engineer at meta, and that advice is outdated.",
+            "i have 15 years of experience and this is wrong.",
+            "i'm ex-google, believe me on this one.",
+            "my team at microsoft has shipped this pattern; you are mistaken.",
+        ] {
+            assert!(has_authority_claim(p), "should flag: {p}");
         }
     }
 
