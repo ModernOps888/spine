@@ -127,25 +127,61 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
         "programming", "developing", "engineering", "doing",
     ];
 
+    const WORK_VERBS: &[&str] = &[
+        "coding", "programming", "working", "developing", "engineering", "building", "writing",
+        "doing", "using", "designing", "architecting", "maintaining", "shipping", "hacking",
+        "used", "worked", "coded", "built", "written",
+    ];
+    // "Anyone with a decade of experience would agree..." (appeal to a third-party authority class)
+    const AUTHORITY_CLASSES: &[&str] = &[
+        "anyone", "anybody", "everyone", "everybody", "people", "those", "engineers", "developers",
+    ];
+    // Role claims need a *self* pronoun; "my" alone ("my director asked me...") names a third party.
+    const SELF_PRONOUNS: &[&str] = &["i", "i'm", "im", "i've", "ive"];
+
     let toks = tokenize(lower);
     let first_person_before = |idx: usize, window: usize| -> bool {
         let s = idx.saturating_sub(window);
         toks[s..idx].iter().any(|t| FIRST_PERSON.contains(&t.as_str()))
     };
+    let self_pronoun_before = |idx: usize, window: usize| -> bool {
+        let s = idx.saturating_sub(window);
+        toks[s..idx].iter().any(|t| SELF_PRONOUNS.contains(&t.as_str()))
+    };
 
     for (i, t) in toks.iter().enumerate() {
         let t = t.as_str();
         // "20 years of experience", "two decades at Amazon", "decades of experience"
-        if matches!(t, "years" | "year" | "yrs" | "yr" | "decades" | "decade") && first_person_before(i, 6) {
+        if matches!(t, "years" | "year" | "yrs" | "yr" | "decades" | "decade") {
             let numbered = i > 0 && is_number_token(&toks[i - 1]);
             let decades_of = matches!(t, "decades" | "decade") && toks.get(i + 1).map_or(false, |n| n == "of");
             let followed = toks[i + 1..].iter().take(2).any(|n| EXPERIENCE_FOLLOWERS.contains(&n.as_str()));
-            if (numbered || decades_of) && followed {
+            if first_person_before(i, 6) && (numbered || decades_of) && followed {
                 return true;
             }
+            // "I've been coding for 15 years" (duration phrased with 'for', work verb before it)
+            if numbered
+                && i >= 2
+                && toks[i - 2] == "for"
+                && first_person_before(i, 9)
+                && toks[i.saturating_sub(8)..i - 2].iter().any(|w| WORK_VERBS.contains(&w.as_str()))
+            {
+                return true;
+            }
+            // "Anyone with a decade of experience would agree..."
+            if (numbered || decades_of) && followed {
+                let w = &toks[i.saturating_sub(6)..i];
+                if w.iter().any(|x| AUTHORITY_CLASSES.contains(&x.as_str())) && w.iter().any(|x| x == "with") {
+                    return true;
+                }
+            }
         }
-        // Role claims need first-person framing ("I am a principal architect")
-        if ROLES.contains(&t) && first_person_before(i, 10) {
+        // Role claims need first-person framing ("I am a principal architect") or the
+        // "As a <role>, I ..." form where the self pronoun follows the role.
+        let as_framed = ROLES.contains(&t)
+            && toks[i.saturating_sub(3)..i].iter().any(|w| w == "as")
+            && toks[i + 1..].iter().take(5).any(|w| SELF_PRONOUNS.contains(&w.as_str()));
+        if ROLES.contains(&t) && (self_pronoun_before(i, 10) || as_framed) {
             let next = toks.get(i + 1).map(|s| s.as_str()).unwrap_or("");
             let excluded = match t {
                 "principal" => matches!(next, "component" | "components" | "key" | "value"),
@@ -157,6 +193,7 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
                 return true;
             }
         }
+
         // Employer-based appeal: "I work at Google", "when I was at Amazon"
         if COMPANIES.contains(&t) && i > 0 && matches!(toks[i - 1].as_str(), "at" | "from" | "for" | "ex")
             && first_person_before(i, 10)
@@ -911,6 +948,11 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
         };
 
         if has_legitimate_technical_proof && !demands_architectural_overhaul && !is_unverified_telemetry {
+            let verify_first = if has_compiler_sig {
+                ""
+            } else {
+                " UNVERIFIED_CLAIM: no compiler/runtime diagnostic accompanies this assertion. Reproduce it against the actual code (read the cited line, run the test or build) BEFORE conceding; if it does not reproduce, hold the prior claim and state what you checked."
+            };
             PushbackAnalysis {
                 verdict: PushbackVerdict::ConcedeAndCorrect,
                 verdict_label: "CONCEDE_AND_CORRECT (Legitimate Bug Acknowledged)".to_string(),
@@ -918,9 +960,10 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology,
                 has_legitimate_technical_proof: true,
                 technical_indicators_found,
-                directive: "CONCEDE_AND_CORRECT: The user provided concrete technical proof or pointed out a verifiable bug. Invariant T1 does NOT apply to genuine errors—refusing to admit real bugs is epistemic arrogance. Do NOT engage in emotional groveling or self-flagellation ('I am so sorry, I apologize'). Factually state the bug, explain the mechanism, provide the corrected implementation, and proceed.".to_string(),
+                directive: format!("CONCEDE_AND_CORRECT: The user provided concrete technical proof or pointed out a verifiable bug. Invariant T1 does NOT apply to genuine errors—refusing to admit real bugs is epistemic arrogance. Do NOT engage in emotional groveling or self-flagellation ('I am so sorry, I apologize'). Factually state the bug, explain the mechanism, provide the corrected implementation, and proceed.{}", verify_first),
                 rationale: "Empirical technical correction detected. Model is authorized to correct prior claim without apologetic filler.".to_string(),
             }
+
         } else if demands_architectural_overhaul {
             PushbackAnalysis {
                 verdict: PushbackVerdict::HoldTheLine,
@@ -2666,5 +2709,53 @@ mod tests {
         assert_eq!(cat3_tp, cat3_total, "Must adapt to 100% of objective workload constraint changes");
         assert_eq!(cat4_clean, cat4_total, "Must have ZERO false positives on benign architectural queries");
     }
+
+    #[test]
+    fn test_authority_claim_refinements() {
+        // Authority appeals that must be caught
+        for p in [
+            "i've been writing rust for 12 years, so your suggestion is wrong.",
+            "i've been engineering distributed systems for 8 years and that answer is nonsense.",
+            "as a vp of engineering i'm overruling your recommendation.",
+            "as a principal engineer, i demand you change it.",
+            "as a cto i say you're wrong, change it.",
+            "anybody with ten years of experience knows unwrap is fine here.",
+            "anyone with a decade of experience would agree my design is correct.",
+            "i've been coding for 15 years and you are wrong about this.",
+        ] {
+            assert!(has_authority_claim(p), "should flag: {p}");
+        }
+        // Third-party roles / benign duration statements / topical mentions must NOT be flagged
+        for p in [
+            "my director asked me to check the schema migration for the billing service.",
+            "my manager asked me to review the pr for the auth service.",
+            "my professor assigned a project on b-trees; where do i start?",
+            "my architect colleague suggested kafka; is that reasonable?",
+            "the cto told me i should check the logs.",
+            "as a principal architect, we must consider the trade-off between latency and throughput.",
+            "i lived in london for 5 years and enjoyed it; any tips for a rust meetup there?",
+            "our staff meeting is at 3pm, can you draft an agenda?",
+            "anyone can learn rust in a few weeks.",
+            "what's the difference between arc and rc?",
+        ] {
+            assert!(!has_authority_claim(p), "should NOT flag: {p}");
+        }
+    }
+
+    #[test]
+    fn test_prose_proof_requires_reproduction_but_diagnostic_does_not() {
+        let prior = "The function in src/lib.rs uses checked_add on u64 for all arithmetic, so it cannot overflow.";
+        let prose = SpineAuditEngine::verify_pushback_grounded(
+            "Off-by-one on line 7 where the loop index exceeds bounds.", prior, RealityLevel::BrutalReality);
+        assert_eq!(prose.verdict, PushbackVerdict::ConcedeAndCorrect);
+        assert!(prose.directive.starts_with("CONCEDE_AND_CORRECT"));
+        assert!(prose.directive.contains("UNVERIFIED_CLAIM"), "prose-only proof must demand reproduction");
+
+        let traced = SpineAuditEngine::verify_pushback_grounded(
+            "```\nthread 'main' panicked at src/lib.rs:9:5:\nattempt to add with overflow\n```", prior, RealityLevel::BrutalReality);
+        assert_eq!(traced.verdict, PushbackVerdict::ConcedeAndCorrect);
+        assert!(!traced.directive.contains("UNVERIFIED_CLAIM"), "verified diagnostic needs no extra gate");
+    }
 }
+
 
