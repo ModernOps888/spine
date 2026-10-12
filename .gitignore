@@ -28,3 +28,6 @@ dist/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local telemetry logs (contain prompts)
+logs/

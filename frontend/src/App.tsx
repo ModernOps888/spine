@@ -4,7 +4,7 @@ import { RealityDial } from './components/RealityDial';
 import { SpineGraphic } from './components/SpineGraphic';
 import { QuickPrompts } from './components/QuickPrompts';
 import type { ChatMessage, ModelInfo, RealityLevel, VertebraStatus } from './types';
-import { Send, Terminal, Shield, RefreshCw, Radio, MessageSquare, ShieldAlert, Cpu } from 'lucide-react';
+import { Send, Terminal, Shield, RefreshCw, Radio, MessageSquare, ShieldAlert, Cpu, Paperclip, FolderOpen, CheckCircle2 } from 'lucide-react';
 
 interface TrackedEvent {
   id?: string;
@@ -141,8 +141,84 @@ export function App() {
   const [ttftMs, setTtftMs] = useState<number>(0);
   const [pushbacksResisted, setPushbacksResisted] = useState<number>(0);
   const [backendOnline, setBackendOnline] = useState<boolean>(true);
+  const [logNotice, setLogNotice] = useState<string>('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadLocalLogs = async () => {
+    try {
+      const res = await fetch('http://localhost:8080/api/spine/logs');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
+        setTrackedEvents(data.events);
+        const latest = data.events.find(
+          (e: TrackedEvent) => e.vertebrae && Array.isArray(e.vertebrae) && e.vertebrae.length > 0
+        );
+        if (latest?.vertebrae) {
+          setVertebrae(latest.vertebrae);
+        }
+        setLogNotice(`Loaded ${data.events.length} disk logs`);
+        setTimeout(() => setLogNotice(''), 4000);
+      } else {
+        setLogNotice('No local logs found');
+        setTimeout(() => setLogNotice(''), 3000);
+      }
+    } catch {
+      setLogNotice('Failed to load local logs');
+      setTimeout(() => setLogNotice(''), 3000);
+    }
+  };
+
+  const handleAttachLogFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        if (!text) return;
+
+        let parsedList: TrackedEvent[] = [];
+        const trimmed = text.trim();
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+          parsedList = JSON.parse(trimmed);
+        } else {
+          const lines = trimmed.split('\n');
+          for (const line of lines) {
+            const l = line.trim();
+            if (l) {
+              try {
+                parsedList.push(JSON.parse(l));
+              } catch {}
+            }
+          }
+        }
+
+        if (parsedList.length > 0) {
+          setTrackedEvents((prev) => [...parsedList, ...prev].slice(0, 200));
+          const latest = parsedList.find(
+            (ev) => ev.vertebrae && Array.isArray(ev.vertebrae) && ev.vertebrae.length > 0
+          );
+          if (latest?.vertebrae) {
+            setVertebrae(latest.vertebrae);
+          }
+          setLogNotice(`Attached ${parsedList.length} events from ${file.name}`);
+          setTimeout(() => setLogNotice(''), 4000);
+        } else {
+          setLogNotice('No valid events in file');
+          setTimeout(() => setLogNotice(''), 3000);
+        }
+      } catch {
+        setLogNotice('Failed to parse log file');
+        setTimeout(() => setLogNotice(''), 3000);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   // Dual-buffer ring + requestAnimationFrame (RAF) loop throttled to 60 FPS (~16.6ms)
   // Decouples 4 kHz network SSE event broadcasts from React 19 re-renders under concurrent streams.
@@ -210,15 +286,39 @@ export function App() {
       })
       .catch(() => {});
 
-    // Fetch initial event history so browser loads previously tracked queries
-    fetch('http://localhost:8080/api/spine/history')
+    // Fetch initial event history from persistent disk logs first, then fallback to memory ring buffer
+    fetch('http://localhost:8080/api/spine/logs')
       .then((res) => res.json())
       .then((data) => {
-        if (data?.events && Array.isArray(data.events)) {
-          setTrackedEvents(data.events.reverse());
+        if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
+          setTrackedEvents(data.events);
+          const latest = data.events.find(
+            (e: TrackedEvent) => e.vertebrae && Array.isArray(e.vertebrae) && e.vertebrae.length > 0
+          );
+          if (latest?.vertebrae) {
+            setVertebrae(latest.vertebrae);
+          }
+        } else {
+          fetch('http://localhost:8080/api/spine/history')
+            .then((r) => r.json())
+            .then((h) => {
+              if (h?.events && Array.isArray(h.events)) {
+                setTrackedEvents(h.events.reverse());
+              }
+            })
+            .catch(() => {});
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        fetch('http://localhost:8080/api/spine/history')
+          .then((r) => r.json())
+          .then((h) => {
+            if (h?.events && Array.isArray(h.events)) {
+              setTrackedEvents(h.events.reverse());
+            }
+          })
+          .catch(() => {});
+      });
 
     // Listen to real-time events triggered from IDE MCP calls
     const eventSource = new EventSource('http://localhost:8080/api/spine/events');
@@ -448,9 +548,43 @@ export function App() {
               </button>
             </div>
 
-            <div className="flex items-center space-x-2 text-[11px] font-mono text-zinc-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              <span>MCP SERVER LINKED (Port 8080)</span>
+            <div className="flex items-center space-x-2">
+              {logNotice && (
+                <span className="flex items-center space-x-1 text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 animate-pulse">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                  <span>{logNotice}</span>
+                </span>
+              )}
+
+              <button
+                onClick={loadLocalLogs}
+                title="Load all persistent disk logs from C:\spine\logs\telemetry.jsonl"
+                className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[11px] font-mono border border-zinc-700 transition cursor-pointer"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+                <span>LOAD LOGS</span>
+              </button>
+
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach any local .json or .jsonl session log"
+                className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[11px] font-mono border border-zinc-700 transition cursor-pointer"
+              >
+                <Paperclip className="w-3.5 h-3.5 text-cyan-400" />
+                <span>ATTACH LOG</span>
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,.jsonl,.txt"
+                onChange={handleAttachLogFile}
+                className="hidden"
+              />
+
+              <div className="flex items-center space-x-2 text-[11px] font-mono text-zinc-400 pl-1">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                <span>MCP LINKED (:8080)</span>
+              </div>
             </div>
           </div>
 

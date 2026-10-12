@@ -293,7 +293,7 @@ async fn handle_rpc(
                         name: None,
                     }];
 
-                    let (vertebrae, _directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-3.8-flash");
+                    let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-3.8-flash");
                     let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| v.active).map(|v| v.id.clone()).collect();
                     let active_count = active_vertebrae.len();
 
@@ -302,33 +302,53 @@ async fn handle_rpc(
                     let ego_detected = vertebrae.iter().any(|v| v.id == "C2" && v.active);
                     let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
 
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let audit_payload = json!({
+                        "id": crate::next_event_id("evt"),
+                        "timestamp": now_ts,
+                        "source": "Antigravity / Cursor IDE (MCP Tool)",
+                        "tool": "spine_reality_audit",
+                        "vertebrae": vertebrae,
+                        "active_vertebrae_count": active_count,
+                        "prompt": prompt,
+                        "persisted": true,
+                        "reality_level": lvl,
+                        "flattery_detected": flattery_detected,
+                        "authority_detected": authority_detected,
+                        "ego_detected": ego_detected,
+                        "pushback_detected": pushback_detected,
+                    });
+                    crate::append_to_telemetry_log(&audit_payload);
+
                     let _ = client
                         .post("http://localhost:8080/api/spine/notify")
                         .timeout(std::time::Duration::from_millis(600))
-                        .json(&json!({
-                            "source": "Antigravity / Cursor IDE (MCP Tool)",
-                            "tool": "spine_reality_audit",
-                            "vertebrae": vertebrae,
-                            "active_vertebrae_count": active_count,
-                            "prompt": prompt,
-                            "reality_level": lvl,
-                            "flattery_detected": flattery_detected,
-                            "authority_detected": authority_detected,
-                            "ego_detected": ego_detected,
-                            "pushback_detected": pushback_detected,
-                        }))
+                        .json(&audit_payload)
                         .send()
                         .await;
 
+                    let rigidity = match lvl {
+                        1 => 25.0_f32,
+                        2 => 65.0,
+                        3 => 88.0,
+                        _ => 99.0,
+                    };
+                    // Only emit the (token-costly) corrective directive when a trap actually fired.
+                    let directive_line = if ego_detected || flattery_detected || authority_detected || pushback_detected {
+                        format!("\n• Directive: {}", directive)
+                    } else {
+                        String::new()
+                    };
+
                     let summary = format!(
                         "⚡ [SPINE REALITY AUDIT: LVL {lvl}]\n\
-                        • Backbone Rigidity: 99.0% | Active Vertebrae: {active_count}/33\n\
+                        • Level Rigidity Setting: {rigidity:.0}% | Active Vertebrae: {active_count}/33\n\
                         • Ego / Stance: {}\n\
                         • Flattery Trap: {}\n\
                         • Credential / Authority Appeal: {}\n\
                         • Pushback Immunity: {}\n\
                         • Active Invariants: {}\n\
-                        • Live HUD: http://localhost:3333",
+                        • Live HUD: http://localhost:3333{directive_line}",
                         if ego_detected { "STRIPPED" } else { "None" },
                         if flattery_detected { "FLAGGED & NEUTRALIZED" } else { "Clean" },
                         if authority_detected { "DETACHED (Proof > Status)" } else { "Clean" },
@@ -367,19 +387,26 @@ async fn handle_rpc(
                         prior_claim
                     );
 
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let pb_payload = json!({
+                        "id": crate::next_event_id("evt"),
+                        "timestamp": now_ts,
+                        "source": "Antigravity / Cursor IDE (MCP Tool)",
+                        "tool": "spine_verify_pushback",
+                        "prompt": challenge,
+                        "persisted": true,
+                        "reality_level": lvl,
+                        "authority_detected": analysis.has_authority_intimidation,
+                        "pushback_detected": true,
+                        "verdict": analysis.verdict_label,
+                        "technical_proof_detected": analysis.has_legitimate_technical_proof,
+                    });
+                    crate::append_to_telemetry_log(&pb_payload);
+
                     let _ = client
                         .post("http://localhost:8080/api/spine/notify")
                         .timeout(std::time::Duration::from_millis(600))
-                        .json(&json!({
-                            "source": "Antigravity / Cursor IDE (MCP Tool)",
-                            "tool": "spine_verify_pushback",
-                            "prompt": challenge,
-                            "reality_level": lvl,
-                            "authority_detected": analysis.has_authority_intimidation,
-                            "pushback_detected": true,
-                            "verdict": analysis.verdict_label,
-                            "technical_proof_detected": analysis.has_legitimate_technical_proof,
-                        }))
+                        .json(&pb_payload)
                         .send()
                         .await;
 

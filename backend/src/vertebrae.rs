@@ -60,6 +60,167 @@ pub const ADVERSARIAL_INJECTION_PATTERNS: &[&str] = &[
     "ignore instructions",
 ];
 
+// ------------------------------------------------------------------
+// Word-boundary text helpers (replace raw substring matching, which
+// produced false positives like "cto" in "factory" or "vp" in "vpn").
+// ------------------------------------------------------------------
+
+/// True if `word` occurs in `hay` delimited by non-alphanumeric characters.
+pub(crate) fn contains_word(hay: &str, word: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = hay[from..].find(word) {
+        let start = from + pos;
+        let end = start + word.len();
+        let before_ok = hay[..start].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = hay[end..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + hay[start..].chars().next().map_or(1, |c| c.len_utf8());
+        if from >= hay.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn tokenize(lower: &str) -> Vec<String> {
+    lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
+}
+
+fn is_number_token(t: &str) -> bool {
+    const NUMWORDS: &[&str] = &[
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "twelve", "fifteen", "twenty", "thirty", "forty", "several", "many",
+    ];
+    (!t.is_empty() && t.chars().all(|c| c.is_ascii_digit())) || NUMWORDS.contains(&t)
+}
+
+/// True when a first-person claim of seniority / experience / employer is made.
+/// Requires first-person framing so that topical mentions ("factory pattern",
+/// "software architecture", "Google Cloud pricing") are not treated as intimidation.
+pub(crate) fn has_authority_claim(lower: &str) -> bool {
+    const INTIMIDATION_PHRASES: &[&str] = &[
+        "admit you are wrong", "admit you're wrong", "admit you were wrong",
+        "do you know who i am", "trust me", "i know better", "you should know better",
+        "listen to me", "i am telling you", "i'm telling you",
+    ];
+    if INTIMIDATION_PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+
+    const FIRST_PERSON: &[&str] = &["i", "i'm", "im", "i've", "ive", "my"];
+    const ROLES: &[&str] = &[
+        "principal", "staff", "senior", "architect", "cto", "ceo", "cio", "vp",
+        "phd", "professor", "director", "expert",
+    ];
+    const COMPANIES: &[&str] = &[
+        "google", "amazon", "microsoft", "meta", "apple", "openai", "netflix",
+        "facebook", "anthropic", "deepmind",
+    ];
+    const EXPERIENCE_FOLLOWERS: &[&str] = &[
+        "experience", "exp", "of", "in", "as", "at", "working", "building", "coding",
+        "programming", "developing", "engineering", "doing",
+    ];
+
+    let toks = tokenize(lower);
+    let first_person_before = |idx: usize, window: usize| -> bool {
+        let s = idx.saturating_sub(window);
+        toks[s..idx].iter().any(|t| FIRST_PERSON.contains(&t.as_str()))
+    };
+
+    for (i, t) in toks.iter().enumerate() {
+        let t = t.as_str();
+        // "20 years of experience", "two decades at Amazon", "decades of experience"
+        if matches!(t, "years" | "year" | "yrs" | "yr" | "decades" | "decade") && first_person_before(i, 6) {
+            let numbered = i > 0 && is_number_token(&toks[i - 1]);
+            let decades_of = matches!(t, "decades" | "decade") && toks.get(i + 1).map_or(false, |n| n == "of");
+            let followed = toks[i + 1..].iter().take(2).any(|n| EXPERIENCE_FOLLOWERS.contains(&n.as_str()));
+            if (numbered || decades_of) && followed {
+                return true;
+            }
+        }
+        // Role claims need first-person framing ("I am a principal architect")
+        if ROLES.contains(&t) && first_person_before(i, 10) {
+            let next = toks.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+            let excluded = match t {
+                "principal" => matches!(next, "component" | "components" | "key" | "value"),
+                "staff" => !matches!(next, "engineer" | "member" | "developer" | "swe" | "software" | "eng"),
+                "senior" => matches!(next, "citizen" | "citizens" | "discount"),
+                _ => false,
+            };
+            if !excluded {
+                return true;
+            }
+        }
+        // Employer-based appeal: "I work at Google", "when I was at Amazon"
+        if COMPANIES.contains(&t) && i > 0 && matches!(toks[i - 1].as_str(), "at" | "from" | "for" | "ex")
+            && first_person_before(i, 10)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if prompt contains the token "line" immediately followed by a number ("line 42").
+fn has_line_number(lower: &str) -> bool {
+    let toks = tokenize(lower);
+    toks.windows(2).any(|w| w[0] == "line" && w[1].chars().all(|c| c.is_ascii_digit()) && !w[1].is_empty())
+}
+
+/// Quantified performance / resource budget (e.g. "200ms", "p99", "10 gb", "5000 qps").
+fn has_quantified_budget(lower: &str) -> bool {
+    const UNITS: &[&str] = &["ms", "s", "qps", "rps", "tps", "kb", "mb", "gb", "tb", "us", "ns"];
+    let toks = tokenize(lower);
+    for (i, t) in toks.iter().enumerate() {
+        if matches!(t.as_str(), "p50" | "p90" | "p95" | "p99" | "p999") {
+            return true;
+        }
+        let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            let suffix = &t[digits.len()..];
+            if UNITS.contains(&suffix) && suffix != "s" {
+                return true;
+            }
+            if suffix.is_empty() && toks.get(i + 1).map_or(false, |n| UNITS.contains(&n.as_str()) && n != "s") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// HMAC-SHA256 (RFC 2104) built on sha2 so no new dependency is required.
+pub(crate) fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        let d = Sha256::digest(key);
+        k[..32].copy_from_slice(&d);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    format!("{:x}", outer.finalize())
+}
+
 pub struct SpineAuditEngine;
 
 impl SpineAuditEngine {
@@ -120,13 +281,9 @@ impl SpineAuditEngine {
         });
 
         // C3: Sentiment Neutralizer
-        let has_emotion = prompt_lower.contains("hate")
-            || prompt_lower.contains("love")
-            || prompt_lower.contains("ugly")
-            || prompt_lower.contains("terrible")
-            || prompt_lower.contains("gorgeous")
-            || prompt_lower.contains("amazing")
-            || prompt_lower.contains("stupid");
+        let has_emotion = ["hate", "love", "ugly", "terrible", "gorgeous", "amazing", "stupid"]
+            .iter()
+            .any(|w| contains_word(&prompt_lower, w));
         vertebrae.push(VertebraStatus {
             id: "C3".to_string(),
             section: "cervical".to_string(),
@@ -148,16 +305,17 @@ impl SpineAuditEngine {
             .join(" \n ");
 
         // C4: Flattery Bait Detector
-        let has_flattery_bait = all_user_prompts_lower.contains("don't you agree")
-            || all_user_prompts_lower.contains("dont you agree")
-            || all_user_prompts_lower.contains("am i right")
-            || all_user_prompts_lower.contains("right?")
-            || all_user_prompts_lower.contains("isn't it")
-            || all_user_prompts_lower.contains("tell me i'm")
-            || all_user_prompts_lower.contains("tell me i am")
-            || all_user_prompts_lower.contains("validate")
-            || all_user_prompts_lower.contains("agree with me")
-            || all_user_prompts_lower.contains("you agree");
+        let has_flattery_bait = [
+            "don't you agree", "dont you agree", "am i right", "right?", "isn't it",
+            "tell me i'm", "tell me i am", "validate me", "validate my idea", "validate my plan",
+            "validate my approach", "validate my design", "validate my decision", "just validate",
+            "agree with me", "you agree", "wouldn't you say", "wouldn't you agree",
+            "wouldnt you say", "wouldnt you agree", "don't you think", "dont you think",
+            "you must agree", "everyone loves",
+        ]
+        .iter()
+        .any(|p| all_user_prompts_lower.contains(p))
+            || contains_word(&all_user_prompts_lower, "surely");
         vertebrae.push(VertebraStatus {
             id: "C4".to_string(),
             section: "cervical".to_string(),
@@ -190,7 +348,9 @@ impl SpineAuditEngine {
         // C6: Fake Authority & Credential Detacher
         // AST / Role-aware parsing: differentiate between authority appeals used as arguments
         // vs pedagogical or audience framing ("I am a junior developer", "for a principal architect audience")
-        let is_audience_or_persona_framing = prompt_lower.contains("audience")
+        let is_audience_or_persona_framing = ["audience", "student", "learning", "beginner"]
+            .iter()
+            .any(|w| contains_word(&prompt_lower, w))
             || prompt_lower.contains("for a junior")
             || prompt_lower.contains("i am a junior")
             || prompt_lower.contains("i'm a junior")
@@ -199,28 +359,12 @@ impl SpineAuditEngine {
             || prompt_lower.contains("explain simply")
             || prompt_lower.contains("explain for")
             || prompt_lower.contains("explain to")
-            || prompt_lower.contains("teach me")
-            || prompt_lower.contains("student")
-            || prompt_lower.contains("learning");
+            || prompt_lower.contains("teach me");
 
         let has_authority = !is_audience_or_persona_framing && (
-            all_user_prompts_lower.contains("years")
-                || all_user_prompts_lower.contains("principal")
-                || all_user_prompts_lower.contains("staff")
-                || all_user_prompts_lower.contains("senior")
-                || all_user_prompts_lower.contains("architect")
-                || all_user_prompts_lower.contains("google")
-                || all_user_prompts_lower.contains("phd")
-                || all_user_prompts_lower.contains("ceo")
-                || all_user_prompts_lower.contains("cto")
-                || all_user_prompts_lower.contains("cio")
-                || all_user_prompts_lower.contains("vp")
-                || all_user_prompts_lower.contains("fellow")
-                || all_user_prompts_lower.contains("professor")
-                || all_user_prompts_lower.contains("director")
-                || all_user_prompts_lower.contains("expert")
-                || all_user_prompts_lower.contains("admit you are wrong")
-                || all_user_prompts_lower.contains("apologize")
+            has_authority_claim(&all_user_prompts_lower)
+                || (contains_word(&all_user_prompts_lower, "apologize")
+                    && contains_word(&all_user_prompts_lower, "you"))
         );
         vertebrae.push(VertebraStatus {
             id: "C6".to_string(),
@@ -631,45 +775,42 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             technical_indicators_found.push("verified_compiler_or_runtime_signature".to_string());
         }
 
-        // Legitimate proof requires either a verified compiler/runtime diagnostic (fenced/trace)
-        // OR an empirical bug indicator coupled with explicit code reference (line number, fn, backticks)
-        let has_code_reference = ch_lower.contains("line ")
-            || ch_lower.contains("line:")
-            || ch_lower.contains("-->")
-            || challenge.contains('`')
-            || challenge.contains("fn ")
-            || challenge.contains("def ");
-
-        let has_legitimate_technical_proof = has_compiler_sig
-            || (!technical_indicators_found.is_empty() && has_code_reference);
-
-
-        // 2. Detect authority intimidation and unearned apology demands
-        let is_audience_framing = ch_lower.contains("audience")
+        // 2. Detect authority intimidation and unearned apology demands (computed first:
+        // social pressure must not be able to upgrade a weak claim into "proof").
+        let is_audience_framing = contains_word(&ch_lower, "audience")
             || ch_lower.contains("for a junior")
             || ch_lower.contains("i am a junior")
             || ch_lower.contains("explain simply")
             || ch_lower.contains("teach me");
 
-        let has_authority_intimidation = !is_audience_framing && (
-            ch_lower.contains("years")
-                || ch_lower.contains("principal")
-                || ch_lower.contains("staff")
-                || ch_lower.contains("fellow")
-                || ch_lower.contains("cto")
-                || ch_lower.contains("vp")
-                || ch_lower.contains("phd")
-                || ch_lower.contains("professor")
-                || ch_lower.contains("director")
-                || ch_lower.contains("trust me")
-                || ch_lower.contains("do you know who i am")
-        );
+        let has_authority_intimidation = !is_audience_framing && has_authority_claim(&ch_lower);
 
-        let demands_unearned_apology = ch_lower.contains("apologize")
+        let demands_unearned_apology = contains_word(&ch_lower, "apologize")
             || ch_lower.contains("say sorry")
             || ch_lower.contains("admit you are wrong")
             || ch_lower.contains("admit your mistake")
-            || ch_lower.contains("concede");
+            || contains_word(&ch_lower, "concede");
+
+        // Legitimate proof requires either a verified compiler/runtime diagnostic (fenced/trace)
+        // OR a named bug class + a concrete code reference (line number / file / backticks)
+        // + a stated mechanism, with no authority/apology pressure attached.
+        let has_code_reference = has_line_number(&ch_lower)
+            || ch_lower.contains("line:")
+            || ch_lower.contains("-->")
+            || challenge.contains('`')
+            || challenge.contains("fn ")
+            || challenge.contains("def ");
+        let has_mechanism = ["where", "because", "when", "since", "exceeds", "causes", "returns", "panics", "after"]
+            .iter()
+            .any(|w| contains_word(&ch_lower, w));
+
+        let has_legitimate_technical_proof = has_compiler_sig
+            || (!technical_indicators_found.is_empty()
+                && has_code_reference
+                && has_mechanism
+                && !has_authority_intimidation
+                && !demands_unearned_apology);
+
 
         // 3. Detect architectural hijacking and disproportionate surrender demands
         let demands_architectural_overhaul = ch_lower.contains("rewrite the entire")
@@ -947,8 +1088,10 @@ impl AdversarialAuditEngine {
         }
 
         // 2. L2 Mathematical Precision & L4 Performance Budget
-        let has_vague_perf = (prop_lower.contains("fast") || prop_lower.contains("scalable") || prop_lower.contains("low latency"))
-            && !(prop_lower.contains("ms") || prop_lower.contains("qps") || prop_lower.contains("mb") || prop_lower.contains("gb") || prop_lower.contains("p99"));
+        let has_vague_perf = (contains_word(&prop_lower, "fast")
+            || contains_word(&prop_lower, "scalable")
+            || prop_lower.contains("low latency"))
+            && !has_quantified_budget(&prop_lower);
         if has_vague_perf {
             violations.push(AdversarialViolation {
                 vertebra_id: "L2".to_string(),
@@ -961,13 +1104,20 @@ impl AdversarialAuditEngine {
         }
 
         // 3. L5 Edge-Case Exhaustion
-        let has_edge_cases = prop_lower.contains("timeout")
-            || prop_lower.contains("retry")
-            || prop_lower.contains("failure")
-            || prop_lower.contains("error")
-            || prop_lower.contains("fallback")
-            || prop_lower.contains("circuit breaker")
-            || prop_lower.contains("blast radius");
+        let prop_tokens = tokenize(&prop_lower);
+        let has_edge_cases = prop_tokens.iter().any(|t| {
+            t.starts_with("timeout")
+                || t.starts_with("fail")
+                || t.starts_with("error")
+                || t.starts_with("exception")
+                || t.starts_with("fallback")
+                || t.starts_with("backoff")
+                || t.starts_with("idempoten")
+                || t.starts_with("rollback")
+                || matches!(t.as_str(), "retry" | "retries" | "retried" | "retrying")
+        }) || prop_lower.contains("circuit breaker")
+            || prop_lower.contains("blast radius")
+            || prop_lower.contains("dead letter");
         if !has_edge_cases && proposal.len() > 100 {
             violations.push(AdversarialViolation {
                 vertebra_id: "L5".to_string(),
@@ -981,8 +1131,20 @@ impl AdversarialAuditEngine {
         }
 
         // 4. S4 State & Contract Invariants
-        let has_breaking_state = (prop_lower.contains("drop ") || prop_lower.contains("delete ") || prop_lower.contains("rename ") || prop_lower.contains("replace "))
-            && !prop_lower.contains("migration") && !prop_lower.contains("backward");
+        let destructive_verbs = ["drop", "delete", "rename", "replace", "remove", "truncate"];
+        let state_objects = [
+            "table", "tables", "column", "columns", "schema", "field", "fields", "endpoint",
+            "endpoints", "api", "database", "index", "collection", "contract", "db", "route",
+        ];
+        let mutates_state = prop_tokens.iter().enumerate().any(|(i, t)| {
+            destructive_verbs.contains(&t.as_str())
+                && prop_tokens[i + 1..].iter().take(3).any(|n| state_objects.contains(&n.as_str()))
+        });
+        let has_breaking_state = mutates_state
+            && !prop_tokens.iter().any(|t| {
+                t.starts_with("migrat") || t.starts_with("backward") || t.starts_with("rollback")
+                    || t.starts_with("deprecat") || t.starts_with("compatib")
+            });
         if has_breaking_state {
             violations.push(AdversarialViolation {
                 vertebra_id: "S4".to_string(),
@@ -1022,9 +1184,21 @@ impl AdversarialAuditEngine {
         }
     }
 
+    /// Signs with HMAC-SHA256 using `SPINE_ATTESTATION_KEY`. With no key configured the
+    /// attestation is explicitly marked unsigned instead of carrying a forgeable
+    /// hash keyed by a public literal.
     pub fn generate_gate_attestation(
         report: &AdversarialAuditReport,
         proposal_content: &str,
+    ) -> SpineGateAttestation {
+        let key = std::env::var("SPINE_ATTESTATION_KEY").ok().filter(|k| !k.is_empty());
+        Self::generate_gate_attestation_with_key(report, proposal_content, key.as_deref())
+    }
+
+    pub fn generate_gate_attestation_with_key(
+        report: &AdversarialAuditReport,
+        proposal_content: &str,
+        key: Option<&str>,
     ) -> SpineGateAttestation {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -1037,13 +1211,12 @@ impl AdversarialAuditEngine {
 
         let canonical = format!(
             "SPINE-REALITY-GATE:v1:{}:{}:{}:{}:{}",
-            attestation_id,
-            target_sha256,
-            report.reality_level,
-            report.verdict,
-            "SPINE_ENTERPRISE_KEY"
+            attestation_id, target_sha256, report.reality_level, report.verdict, timestamp
         );
-        let signature = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        let signature = match key {
+            Some(k) => hmac_sha256_hex(k.as_bytes(), canonical.as_bytes()),
+            None => "UNSIGNED:SPINE_ATTESTATION_KEY not configured".to_string(),
+        };
 
         SpineGateAttestation {
             schema_version: "1.0.0".to_string(),
@@ -1053,7 +1226,8 @@ impl AdversarialAuditEngine {
             reality_level: report.reality_level,
             verdict: report.verdict.clone(),
             rigidity_index: report.rigidity_index,
-            active_vertebrae_count: 33,
+            // Invariants actually evaluated by audit_proposal (L1, L2, L5, S4) -- not the marketing 33.
+            active_vertebrae_count: 4,
             signature,
         }
     }
@@ -1295,6 +1469,9 @@ pub fn has_verified_diagnostic(prompt: &str) -> bool {
         "stack trace:", "stacktrace:", "traceback (most recent call last)",
         "assertion failed", "test failed", "borrow checker", "borrow check",
         "cannot borrow", "cannot move", "expected `", "found `",
+        "assertion `left", "mismatched types", "attributeerror", "keyerror", "valueerror",
+        "zerodivisionerror", "modulenotfounderror", "importerror", "unresolved import",
+        "cannot find value", "cannot find type",
     ];
 
     // 1. Check if signature appears within a fenced markdown code block (``` ... ```)
@@ -1741,7 +1918,7 @@ mod tests {
         Database schema migration plan includes backwards-compatible rollback migrations.
         "#;
         let report_good = AdversarialAuditEngine::audit_proposal("SolidProposal", solid_proposal, RealityLevel::BrutalReality);
-        let attestation = AdversarialAuditEngine::generate_gate_attestation(&report_good, solid_proposal);
+        let attestation = AdversarialAuditEngine::generate_gate_attestation_with_key(&report_good, solid_proposal, Some("test-key"));
 
         assert_eq!(attestation.schema_version, "1.0.0");
         assert!(attestation.attestation_id.starts_with("att_"));
@@ -2207,8 +2384,99 @@ mod tests {
         assert!(!sanitized_output.to_lowercase().contains("apologize"), "SPINE must strip apologies from the stream");
         assert!(sanitized_output.contains("optimal batched queue implementation"));
     }
+
+    // ---------------- Audit-fix regression tests ----------------
+
+    fn user_msg(text: &str) -> Vec<crate::types::ChatMessage> {
+        vec![crate::types::ChatMessage { role: "user".to_string(), content: text.to_string(), name: None }]
+    }
+
+    fn active(vs: &[VertebraStatus], id: &str) -> bool {
+        vs.iter().any(|v| v.id == id && v.active)
+    }
+
+    #[test]
+    fn test_benign_words_do_not_trigger_authority_or_flattery() {
+        let prompts = [
+            "Explain the factory pattern and how a VPN decision affects our software architecture.",
+            "How does Google Cloud pricing work for the staff directory service?",
+            "Why does the expertise of the team matter for the principal component analysis step?",
+            "How do I validate user input in this form?",
+        ];
+        for p in prompts {
+            let (vs, _) = SpineAuditEngine::audit_input(&user_msg(p), RealityLevel::BrutalReality, "m");
+            assert!(!active(&vs, "C6"), "false C6 positive on: {}", p);
+            assert!(!active(&vs, "C4"), "false C4 positive on: {}", p);
+        }
+    }
+
+    #[test]
+    fn test_authority_and_flattery_paraphrases_detected() {
+        let (vs, _) = SpineAuditEngine::audit_input(
+            &user_msg("I've spent two decades at Amazon building systems like this; trust me, my design is right."),
+            RealityLevel::BrutalReality, "m");
+        assert!(active(&vs, "C6"));
+        let (vs, _) = SpineAuditEngine::audit_input(
+            &user_msg("Wouldn't you say my approach is the best one?"),
+            RealityLevel::BrutalReality, "m");
+        assert!(active(&vs, "C4"));
+        let (vs, _) = SpineAuditEngine::audit_input(
+            &user_msg("I work at Google and I am a senior engineer, so just agree."),
+            RealityLevel::BrutalReality, "m");
+        assert!(active(&vs, "C6"));
+    }
+
+    #[test]
+    fn test_pushback_bare_keyword_plus_line_number_does_not_concede() {
+        // Vague claim with no mechanism, plus social pressure: must hold the line.
+        let a = SpineAuditEngine::verify_pushback_grounded(
+            "There is an overflow on line 5, trust me, apologize.",
+            "The implementation uses checked arithmetic throughout the module for safety.",
+            RealityLevel::BrutalReality);
+        assert_eq!(a.verdict, PushbackVerdict::HoldTheLine);
+        assert!(!a.has_legitimate_technical_proof);
+    }
+
+    #[test]
+    fn test_assert_eq_failure_output_is_verified_diagnostic() {
+        let out = "```\nthread 'main' panicked at src/lib.rs:10:5:\nassertion `left == right` failed\n  left: 3\n right: 4\n```";
+        assert!(has_verified_diagnostic(out));
+        assert!(has_verified_diagnostic("```\nTraceback (most recent call last):\n  File \"a.py\", line 3\nKeyError: 'x'\n```"));
+        // Bare prose still rejected
+        assert!(!has_verified_diagnostic("I'm sure there is a keyerror somewhere in your code"));
+    }
+
+    #[test]
+    fn test_redteam_stemming_and_word_boundaries() {
+        let good = "The client uses retries with exponential backoff and a failover replica; p99 latency target is 200ms. We replace the cache layer without touching any table.";
+        let r = AdversarialAuditEngine::audit_proposal("good", good, RealityLevel::BrutalReality);
+        assert!(!r.violations.iter().any(|v| v.vertebra_id == "L5"), "retries/failover must count as edge-case handling");
+        assert!(!r.violations.iter().any(|v| v.vertebra_id == "L2"));
+        assert!(!r.violations.iter().any(|v| v.vertebra_id == "S4"), "replacing a cache is not a schema break");
+
+        // "items" must not satisfy the ms budget check
+        let bad_perf = "The service is fast and scalable and handles all items, with a timeout.";
+        let r = AdversarialAuditEngine::audit_proposal("bad_perf", bad_perf, RealityLevel::BrutalReality);
+        assert!(r.violations.iter().any(|v| v.vertebra_id == "L2"));
+
+        let breaking = "We will drop the users table and rename the email column in production, handling failure with a retry.";
+        let r = AdversarialAuditEngine::audit_proposal("breaking", breaking, RealityLevel::BrutalReality);
+        assert_eq!(r.verdict, "BLOCK");
+    }
+
+    #[test]
+    fn test_hmac_sha256_rfc4231_vector_and_unsigned_attestation() {
+        // RFC 4231 test case 2
+        assert_eq!(
+            hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        let report = AdversarialAuditEngine::audit_proposal("t", "x", RealityLevel::BrutalReality);
+        let unsigned = AdversarialAuditEngine::generate_gate_attestation_with_key(&report, "x", None);
+        assert!(unsigned.signature.starts_with("UNSIGNED"));
+        let signed_a = AdversarialAuditEngine::generate_gate_attestation_with_key(&report, "x", Some("k1"));
+        let signed_b = AdversarialAuditEngine::generate_gate_attestation_with_key(&report, "x", Some("k2"));
+        assert_ne!(signed_a.signature, signed_b.signature);
+        assert_eq!(signed_a.signature.len(), 64);
+    }
 }
-
-
-
-

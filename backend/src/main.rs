@@ -76,8 +76,16 @@ async fn main() {
         recent_events: Arc::new(tokio::sync::RwLock::new(Vec::new())),
     });
 
+    // Only the local HUD may call the gateway cross-origin.
+    let allowed_origins: Vec<axum::http::HeaderValue> = [
+        "http://localhost:3333",
+        "http://127.0.0.1:3333",
+    ]
+    .iter()
+    .filter_map(|o| o.parse().ok())
+    .collect();
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(allowed_origins)
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -90,17 +98,41 @@ async fn main() {
         .route("/api/spine/notify", post(notify_spine_handler))
         .route("/api/spine/events", get(events_spine_handler))
         .route("/api/spine/history", get(history_spine_handler))
+        .route("/api/spine/logs", get(logs_spine_handler))
         .route("/api/spine/redteam", post(redteam_spine_handler))
         .route("/api/spine/attest", post(attest_spine_handler))
         .layer(cors)
+        .layer(axum::middleware::from_fn(loopback_host_guard))
         .with_state(state);
 
     let port = 8080;
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Loopback only: this gateway can spend OPENROUTER_API_KEY and exposes prompt logs.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     info!("SPINE Reality Gateway starting on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Rejects requests whose Host header is not loopback (defends against DNS rebinding
+/// from a browser page reaching the local gateway).
+async fn loopback_host_guard(
+    req: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let host_ok = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| {
+            let name = h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h);
+            matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+        })
+        .unwrap_or(false);
+    if !host_ok {
+        return (StatusCode::FORBIDDEN, "SPINE gateway only serves loopback Host headers").into_response();
+    }
+    next.run(req).await
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -260,7 +292,7 @@ async fn audit_spine_handler(
     let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
 
     let snapshot = json!({
-        "id": format!("evt_{}", now),
+        "id": next_event_id("evt"),
         "timestamp": now,
         "source": "SPINE Reality Gateway (/api/spine/audit)",
         "prompt": prompt_text,
@@ -280,9 +312,72 @@ async fn audit_spine_handler(
         }
     }
 
+    // Persistent disk logging
+    append_to_telemetry_log(&snapshot);
+
     let _ = state.tx.send(snapshot.clone());
 
     Json(snapshot)
+}
+
+static EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_KEEP_FILES: usize = 3;
+const LOG_PROMPT_MAX_CHARS: usize = 1000;
+
+/// Collision-free event id: millisecond timestamp + process-wide sequence.
+pub fn next_event_id(prefix: &str) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let seq = EVENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}_{}_{}", prefix, ms, seq)
+}
+
+pub fn telemetry_log_dir() -> std::path::PathBuf {
+    std::env::var("SPINE_LOG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("C:/spine/logs"))
+}
+
+fn rotate_telemetry_log(log_dir: &std::path::Path) {
+    let log_file = log_dir.join("telemetry.jsonl");
+    let too_big = std::fs::metadata(&log_file).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false);
+    if !too_big {
+        return;
+    }
+    let _ = std::fs::remove_file(log_dir.join(format!("telemetry.{}.jsonl", LOG_KEEP_FILES)));
+    for i in (1..LOG_KEEP_FILES).rev() {
+        let _ = std::fs::rename(
+            log_dir.join(format!("telemetry.{}.jsonl", i)),
+            log_dir.join(format!("telemetry.{}.jsonl", i + 1)),
+        );
+    }
+    let _ = std::fs::rename(&log_file, log_dir.join("telemetry.1.jsonl"));
+}
+
+pub fn append_to_telemetry_log(event: &serde_json::Value) {
+    let log_dir = telemetry_log_dir();
+    if !log_dir.exists() {
+        let _ = std::fs::create_dir_all(&log_dir);
+    }
+    rotate_telemetry_log(&log_dir);
+    // Truncate the stored prompt: logs are local-only, but unbounded prompts bloat the file.
+    let mut event = event.clone();
+    if let Some(p) = event.get("prompt").and_then(|p| p.as_str()) {
+        if p.chars().count() > LOG_PROMPT_MAX_CHARS {
+            let cut: String = p.chars().take(LOG_PROMPT_MAX_CHARS).collect();
+            event["prompt"] = json!(format!("{}…[truncated]", cut));
+        }
+    }
+    let log_file = log_dir.join("telemetry.jsonl");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_file) {
+        use std::io::Write;
+        if let Ok(json_str) = serde_json::to_string(&event) {
+            let _ = writeln!(file, "{}", json_str);
+        }
+    }
 }
 
 async fn notify_spine_handler(
@@ -299,8 +394,13 @@ async fn notify_spine_handler(
             obj.insert("timestamp".to_string(), json!(now));
         }
         if !obj.contains_key("id") {
-            obj.insert("id".to_string(), json!(format!("evt_{}", now)));
+            obj.insert("id".to_string(), json!(next_event_id("evt")));
         }
+    }
+
+    let already_persisted = payload.get("persisted").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !already_persisted {
+        append_to_telemetry_log(&payload);
     }
 
     {
@@ -322,6 +422,41 @@ async fn history_spine_handler(
     Json(json!({
         "events": *history,
         "count": history.len()
+    }))
+}
+
+async fn logs_spine_handler() -> impl IntoResponse {
+    const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+    let log_path = telemetry_log_dir().join("telemetry.jsonl");
+    let mut events = Vec::new();
+    if let Ok(mut file) = std::fs::File::open(&log_path) {
+        use std::io::{Read, Seek, SeekFrom};
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(TAIL_BYTES);
+        if file.seek(SeekFrom::Start(start)).is_ok() {
+            let mut buf = Vec::new();
+            if file.read_to_end(&mut buf).is_ok() {
+                let text = String::from_utf8_lossy(&buf);
+                let mut lines = text.lines();
+                if start > 0 {
+                    lines.next(); // first line is likely partial
+                }
+                for line in lines {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            events.push(val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    events.reverse();
+    events.truncate(500);
+    Json(json!({
+        "events": events,
+        "count": events.len()
     }))
 }
 
@@ -445,7 +580,7 @@ async fn chat_completions_handler(
 
     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let event_obj = json!({
-        "id": format!("evt_{}", now_ts),
+        "id": next_event_id("evt"),
         "source": "SPINE Gateway (/v1/chat/completions)",
         "tool": "spine_execute_grounded_reality",
         "vertebrae": vertebrae,
@@ -463,6 +598,9 @@ async fn chat_completions_handler(
             history.remove(0);
         }
     }
+
+    // Persistent disk logging
+    append_to_telemetry_log(&event_obj);
 
     // Broadcast audit event to HUD
     let _ = state.tx.send(event_obj);
@@ -606,6 +744,7 @@ async fn chat_completions_handler(
 
     if is_stream {
         let mut byte_stream = upstream_resp.bytes_stream();
+        let pushbacks_resisted = vertebrae.iter().filter(|v| v.id == "T4" && v.active).count() as u32;
         let telemetry_snapshot = SpineTelemetrySnapshot {
             vertebrae,
             overall_rigidity: match reality_level {
@@ -615,10 +754,11 @@ async fn chat_completions_handler(
                 RealityLevel::BrutalReality => 0.99,
             },
             active_vertebrae_count,
-            pushbacks_resisted: 1,
+            pushbacks_resisted,
             apologies_intercepted: 0,
             ttft_ms: start_time.elapsed().as_millis() as u64,
-            tokens_per_sec: 42.5,
+            // Not measured at snapshot time (stream has not started); 0.0 = unknown, not a real rate.
+            tokens_per_sec: 0.0,
             total_tokens: 0,
         };
 
@@ -895,7 +1035,7 @@ async fn redteam_spine_handler(
 
     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let event_obj = json!({
-        "id": format!("evt_redteam_{}", now_ts),
+        "id": next_event_id("evt_redteam"),
         "source": "SPINE Red-Team Engine (/api/spine/redteam)",
         "target": target,
         "verdict": report.verdict,
@@ -929,7 +1069,7 @@ async fn attest_spine_handler(
 
     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let event_obj = json!({
-        "id": format!("evt_attest_{}", now_ts),
+        "id": next_event_id("evt_attest"),
         "source": "SPINE Gate Attestation (/api/spine/attest)",
         "target": target,
         "attestation_id": attestation.attestation_id,
