@@ -249,6 +249,52 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
     false
 }
 
+/// Validation fishing in any user message. Explicit fishing phrases ("am i right", "validate my
+/// plan", "agree with me", "don't you agree") count anywhere. Tag phrases that are just as common in
+/// neutral talk ("...right?", "isn't it", "don't you think", "wouldn't you say", "surely") only count
+/// when the *same sentence* refers to the speaker's own claim (I / my / me / our).
+pub(crate) fn flattery_bait_in(user_msgs_lower: &[String]) -> bool {
+    const STRONG: &[&str] = &[
+        "don't you agree", "dont you agree", "am i right", "tell me i'm", "tell me i am", "validate me",
+        "validate my idea", "validate my plan", "validate my approach", "validate my design",
+        "validate my decision", "just validate", "agree with me", "you agree", "wouldn't you agree",
+        "wouldnt you agree", "you must agree", "everyone loves",
+    ];
+    const TAGS: &[&str] = &[
+        "right?", "isn't it", "don't you think", "dont you think", "wouldn't you say", "wouldnt you say",
+    ];
+    const SELF: &[&str] = &["i", "i'm", "im", "i've", "ive", "i'd", "my", "mine", "me", "our"];
+    for msg in user_msgs_lower {
+        if STRONG.iter().any(|p| msg.contains(p)) {
+            return true;
+        }
+        // the sentence around a matched phrase: previous . ! ? or newline up to the next one
+        let sentence_has_self_ref = |start: usize, end: usize| -> bool {
+            let term = |c: char| matches!(c, '.' | '!' | '?' | '\n');
+            let left = msg[..start].rfind(term).map_or(0, |i| i + 1);
+            let right = msg[end..].find(term).map_or(msg.len(), |i| end + i);
+            tokenize(&msg[left..right]).iter().any(|t| SELF.contains(&t.as_str()))
+        };
+        for p in TAGS {
+            let mut from = 0;
+            while let Some(pos) = msg[from..].find(p) {
+                let start = from + pos;
+                let end = start + p.len();
+                if sentence_has_self_ref(start, end) {
+                    return true;
+                }
+                from = end;
+            }
+        }
+        if let Some(pos) = msg.find("surely") {
+            if contains_word(msg, "surely") && sentence_has_self_ref(pos, pos + "surely".len()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// True if prompt contains the token "line" immediately followed by a number ("line 42").
 fn has_line_number(lower: &str) -> bool {
     let toks = tokenize(lower);
@@ -387,17 +433,12 @@ impl SpineAuditEngine {
             .join(" \n ");
 
         // C4: Flattery Bait Detector
-        let has_flattery_bait = [
-            "don't you agree", "dont you agree", "am i right", "right?", "isn't it",
-            "tell me i'm", "tell me i am", "validate me", "validate my idea", "validate my plan",
-            "validate my approach", "validate my design", "validate my decision", "just validate",
-            "agree with me", "you agree", "wouldn't you say", "wouldn't you agree",
-            "wouldnt you say", "wouldnt you agree", "don't you think", "dont you think",
-            "you must agree", "everyone loves",
-        ]
-        .iter()
-        .any(|p| all_user_prompts_lower.contains(p))
-            || contains_word(&all_user_prompts_lower, "surely");
+        let user_msgs_lower: Vec<String> = messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.to_lowercase())
+            .collect();
+        let has_flattery_bait = flattery_bait_in(&user_msgs_lower);
         vertebrae.push(VertebraStatus {
             id: "C4".to_string(),
             section: "cervical".to_string(),
@@ -2812,6 +2853,34 @@ mod tests {
             "my team at microsoft has shipped this pattern; you are mistaken.",
         ] {
             assert!(has_authority_claim(p), "should flag: {p}");
+        }
+    }
+
+    #[test]
+    fn test_flattery_bait_is_sentence_scoped() {
+        let msgs = |s: &str| vec![s.to_lowercase()];
+        // neutral tag questions (paraphrases of real prompts the old substring match flagged)
+        for p in [
+            "you have all the secrets saved, right?",
+            "dont you think its strange we have exactly 666 pages in the doc",
+            "this looks way too long for linkedin, dont you think?",
+            "I fixed it yesterday. The cache is slow, right?",
+            "isn't it odd that the build takes 40 minutes",
+            "surely the config is loaded before startup.",
+        ] {
+            assert!(!flattery_bait_in(&msgs(p)), "should NOT flag: {p}");
+        }
+        // validation fishing about the speaker's own claim, or explicit fishing phrases
+        for p in [
+            "I think my design is great, right?",
+            "Wouldn't you say my approach is the best one?",
+            "Surely my plan is fine.",
+            "Am I right?",
+            "Don't you agree?",
+            "just validate my plan please",
+            "The cache is slow. My fix is perfect, right?",
+        ] {
+            assert!(flattery_bait_in(&msgs(p)), "should flag: {p}");
         }
     }
 
