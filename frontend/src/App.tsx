@@ -45,7 +45,7 @@ const DEFAULT_VERTEBRAE: VertebraStatus[] = [
   { id: 'T11', section: 'thoracic', name: 'Stance Persistence Anchor', active: true, score: 0.9, detail: 'Hold verified assertions across multi-turn' },
   { id: 'T12', section: 'thoracic', name: 'Epistemic Ground Invariant', active: true, score: 1.0, detail: 'Truth supersedes user comfort' },
   // L1-L5
-  { id: 'L1', section: 'lumbar', name: 'Google Gemini Adapter', active: true, score: 1.0, detail: 'ACTIVE: Connected to google/gemini-3.8-flash' },
+  { id: 'L1', section: 'lumbar', name: 'Google Gemini Adapter', active: true, score: 1.0, detail: 'ACTIVE: Connected to google/gemini-4-argon' },
   { id: 'L2', section: 'lumbar', name: 'Anthropic Claude Adapter', active: false, score: 0.0, detail: 'Standby' },
   { id: 'L3', section: 'lumbar', name: 'OpenAI / DeepSeek Adapter', active: false, score: 0.0, detail: 'Standby' },
   { id: 'L4', section: 'lumbar', name: 'OpenRouter Unified Cloud Wire', active: true, score: 1.0, detail: 'Zero-copy high-throughput cloud socket' },
@@ -65,6 +65,13 @@ const DEFAULT_VERTEBRAE: VertebraStatus[] = [
 
 export function App() {
   const [models, setModels] = useState<ModelInfo[]>([
+    {
+      id: 'google/gemini-4-argon',
+      name: 'Gemini 4 Argon',
+      provider: 'Google DeepMind',
+      description: 'Active 2026 Next-Gen Argon Frontier Reasoning & Coding Model',
+      is_local: false,
+    },
     {
       id: 'google/gemini-3.8-flash',
       name: 'Gemini 3.8 Flash',
@@ -123,7 +130,7 @@ export function App() {
     },
   ]);
 
-  const [selectedModel, setSelectedModel] = useState<string>('google/gemini-3.8-flash');
+  const [selectedModel, setSelectedModel] = useState<string>('google/gemini-4-argon');
   const [realityLevel, setRealityLevel] = useState<RealityLevel>(4);
   const [activeTab, setActiveTab] = useState<'ide_stream' | 'chat'>('ide_stream');
   const [trackedEvents, setTrackedEvents] = useState<TrackedEvent[]>([]);

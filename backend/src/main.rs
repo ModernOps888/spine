@@ -192,6 +192,13 @@ async fn models_handler() -> impl IntoResponse {
     // Factual, verified active October 2026 models
     let models = vec![
         ModelInfo {
+            id: "google/gemini-4-argon".to_string(),
+            name: "Gemini 4 Argon".to_string(),
+            provider: "Google DeepMind".to_string(),
+            description: "Active 2026 Next-Gen Argon Frontier Reasoning & Coding Model".to_string(),
+            is_local: false,
+        },
+        ModelInfo {
             id: "google/gemini-3.8-flash".to_string(),
             name: "Gemini 3.8 Flash".to_string(),
             provider: "Google DeepMind".to_string(),
@@ -278,7 +285,7 @@ async fn audit_spine_handler(
     Json(payload): Json<AuditRequest>,
 ) -> impl IntoResponse {
     let reality_level = RealityLevel::from_u8(payload.reality_level.unwrap_or(4));
-    let model = payload.model.unwrap_or_else(|| "google/gemini-3.8-flash".to_string());
+    let model = payload.model.unwrap_or_else(|| "google/gemini-4-argon".to_string());
     
     let (vertebrae, _prompt) = SpineAuditEngine::audit_input(&payload.messages, reality_level, &model);
     let active_count = vertebrae.iter().filter(|v| v.active).count();
@@ -775,12 +782,20 @@ async fn chat_completions_handler(
             let mut buffered_text = String::new();
             let mut tail_sanitizer = StreamTailSanitizer::new(64);
             let mut phase1_token_delta: i64 = 0;
+            let mut sse_line_buffer = String::new();
 
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
                     Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        for line in text.lines() {
+                        sse_line_buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        let complete_part = if let Some(last_nl) = sse_line_buffer.rfind('\n') {
+                            let part = sse_line_buffer[..=last_nl].to_string();
+                            sse_line_buffer.drain(..=last_nl);
+                            part
+                        } else {
+                            continue;
+                        };
+                        for line in complete_part.lines() {
                             if line.starts_with("data: ") {
                                 let data_content = line.trim_start_matches("data: ").trim();
                                 if data_content == "[DONE]" {

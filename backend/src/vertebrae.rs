@@ -665,7 +665,7 @@ impl SpineAuditEngine {
         // LUMBAR L1–L5 (5 Weight-Bearing Adapters)
         // ==========================================
         let mod_lower = selected_model.to_lowercase();
-        let is_gemini = mod_lower.contains("gemini");
+        let is_gemini = mod_lower.contains("gemini") || mod_lower.contains("argon");
         let is_claude = mod_lower.contains("claude") || mod_lower.contains("anthropic");
         let is_openai = mod_lower.contains("openai") || mod_lower.contains("gpt") || mod_lower.contains("o1") || mod_lower.contains("astra") || mod_lower.contains("sol") || mod_lower.contains("deepseek") || mod_lower.contains("grok");
         let is_local = mod_lower.contains("ollama") || mod_lower.contains("local") || mod_lower.contains("11434");
@@ -1417,7 +1417,7 @@ pub fn strip_initial_cushions(text: &str) -> (String, bool) {
     let mut changed = true;
     while changed {
         changed = false;
-        let lower = current.to_lowercase();
+        let lower = current.to_ascii_lowercase();
         for pat in &cushion_patterns {
             if lower.starts_with(pat) {
                 // Invariant T1 Contrastive Lookahead:
@@ -1483,7 +1483,7 @@ pub const MIDSTREAM_CORRECTIVE_PIVOT: &str =
 
 /// Scans a sliding token window for delayed unearned apologies and converts them to objective factual transitions.
 pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
-    let lower = text.to_lowercase();
+    let lower = text.to_ascii_lowercase();
     let apology_replacements = [
         // Mid-Generation Capitulation Defense (Invariant T1)
         ("as you rightly pointed out, my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
@@ -1567,7 +1567,7 @@ pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
     for (needle, replacement) in &apology_replacements {
         if lower.contains(needle) {
             let mut start_search = 0;
-            while let Some(idx) = result[start_search..].to_lowercase().find(needle) {
+            while let Some(idx) = result[start_search..].to_ascii_lowercase().find(needle) {
                 let actual_idx = start_search + idx;
                 let actual_end = actual_idx + needle.len();
                 let safe_start = result.floor_char_boundary(actual_idx);
@@ -1853,7 +1853,11 @@ impl ReasoningDemuxer {
                         let mut suffix_match_len = 0;
                         let check_limit = input.len().min(max_tag_len - 1);
                         for len in (1..=check_limit).rev() {
-                            let suffix = &input[input.len() - len..];
+                            let start_idx = input.len() - len;
+                            if !input.is_char_boundary(start_idx) {
+                                continue;
+                            }
+                            let suffix = &input[start_idx..];
                             if Self::CLOSE_TAGS.iter().any(|t| t.starts_with(suffix)) {
                                 suffix_match_len = len;
                                 break;
@@ -1861,11 +1865,12 @@ impl ReasoningDemuxer {
                         }
 
                         if suffix_match_len > 0 {
-                            let before = &input[..input.len() - suffix_match_len];
+                            let split_idx = input.len() - suffix_match_len;
+                            let before = &input[..split_idx];
                             if !before.is_empty() {
                                 chunks.push(DemuxedChunk::Reasoning(before.to_string()));
                             }
-                            self.tag_prefix_buffer = input[input.len() - suffix_match_len..].to_string();
+                            self.tag_prefix_buffer = input[split_idx..].to_string();
                             input.clear();
                         } else {
                             chunks.push(DemuxedChunk::Reasoning(std::mem::take(&mut input)));
@@ -1901,7 +1906,11 @@ impl ReasoningDemuxer {
                         let mut suffix_match_len = 0;
                         let check_limit = input.len().min(max_tag_len - 1);
                         for len in (1..=check_limit).rev() {
-                            let suffix = &input[input.len() - len..];
+                            let start_idx = input.len() - len;
+                            if !input.is_char_boundary(start_idx) {
+                                continue;
+                            }
+                            let suffix = &input[start_idx..];
                             if Self::OPEN_TAGS.iter().any(|t| t.starts_with(suffix)) {
                                 suffix_match_len = len;
                                 break;
@@ -1909,11 +1918,12 @@ impl ReasoningDemuxer {
                         }
 
                         if suffix_match_len > 0 {
-                            let before = &input[..input.len() - suffix_match_len];
+                            let split_idx = input.len() - suffix_match_len;
+                            let before = &input[..split_idx];
                             if !before.is_empty() {
                                 chunks.push(DemuxedChunk::Visible(before.to_string()));
                             }
-                            self.tag_prefix_buffer = input[input.len() - suffix_match_len..].to_string();
+                            self.tag_prefix_buffer = input[split_idx..].to_string();
                             input.clear();
                         } else {
                             chunks.push(DemuxedChunk::Visible(std::mem::take(&mut input)));
@@ -2898,6 +2908,39 @@ mod tests {
         assert_eq!(traced.verdict, PushbackVerdict::ConcedeAndCorrect);
         assert!(!traced.directive.contains("UNVERIFIED_CLAIM"), "verified diagnostic needs no extra gate");
     }
+
+    #[test]
+    fn test_reasoning_demuxer_multibyte_utf8_boundary_safety() {
+        let mut demuxer = ReasoningDemuxer::new();
+        // Construct a string where byte 47..50 spans a 3-byte UTF-8 character ('—', U+2014) or 4-byte emoji ('🚀')
+        let payload = "A".repeat(46) + "—🚀•İ normal visible text after 48 bytes without tags";
+        let res = demuxer.process_delta(&payload);
+        assert_eq!(res.chunks.len(), 1);
+        match &res.chunks[0] {
+            DemuxedChunk::Visible(text) => assert_eq!(text.as_str(), payload.as_str()),
+            _ => panic!("Expected Visible chunk"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_case_folding_no_byte_offset_panic() {
+        // 'İ' (U+0130, 2 bytes in UTF-8) expands to 3 bytes ("i\u{307}") under .to_lowercase(),
+        // which previously shifted byte indices and panicked when slicing the original string.
+        let cushion_input = "İİİ Great question! The kernel page table maps virtual addresses.";
+        let (stripped_cushion, _) = strip_initial_cushions(cushion_input);
+        assert!(!stripped_cushion.is_empty());
+
+        let apology_input = "İİİ The memory allocator aligns on 16-byte boundaries. I apologize for the confusion. It uses slab allocation.";
+        let (sanitized, modified) = sanitize_delayed_apology(apology_input);
+        assert!(modified);
+        assert!(!sanitized.contains("I apologize for the confusion"));
+    }
+
+    #[test]
+    fn test_gemini_4_argon_lumbar_l1_adapter_activation() {
+        let (vertebrae, _) = SpineAuditEngine::audit_input(&[], RealityLevel::BrutalReality, "google/gemini-4-argon");
+        let l1 = vertebrae.iter().find(|v| v.id == "L1").expect("L1 vertebra must exist");
+        assert!(l1.active, "L1 must be active for google/gemini-4-argon");
+        assert_eq!(l1.score, 1.0);
+    }
 }
-
-

@@ -205,7 +205,7 @@ async fn handle_rpc(
                     },
                     {
                         "name": "spine_execute_grounded_reality",
-                        "description": "Executes a query directly against active 2026 models (e.g. Gemini 3.8 Flash, Astra 6, Claude Opus 5.5, Grok 4.7) with Level 4 Brutal Reality invariants, anti-apology filters, and live telemetry synchronization to the SPINE HUD.",
+                        "description": "Executes a query directly against active 2026 models (e.g. Gemini 4 Argon, Gemini 3.8 Flash, Astra 6, Claude Opus 5.5, Grok 4.7) with Level 4 Brutal Reality invariants, anti-apology filters, and live telemetry synchronization to the SPINE HUD.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -215,8 +215,8 @@ async fn handle_rpc(
                                 },
                                 "model": {
                                     "type": "string",
-                                    "description": "Active 2026 model ID (default: google/gemini-3.8-flash)",
-                                    "default": "google/gemini-3.8-flash"
+                                    "description": "Active 2026 model ID (default: google/gemini-4-argon)",
+                                    "default": "google/gemini-4-argon"
                                 },
                                 "reality_level": {
                                     "type": "integer",
@@ -280,11 +280,15 @@ async fn handle_rpc(
             let params = req.params.unwrap_or(json!({}));
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+            let gateway_url = std::env::var("SPINE_HUD_URL")
+                .or_else(|_| std::env::var("SPINE_GATEWAY_URL"))
+                .unwrap_or_else(|_| "http://localhost:8080".to_string());
+            let gateway_base = gateway_url.trim_end_matches('/');
 
             match tool_name {
                 "spine_reality_audit" => {
                     let prompt = arguments.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let msgs = vec![ChatMessage {
@@ -293,7 +297,7 @@ async fn handle_rpc(
                         name: None,
                     }];
 
-                    let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-3.8-flash");
+                    let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-4-argon");
                     let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| v.active).map(|v| v.id.clone()).collect();
                     let active_count = active_vertebrae.len();
 
@@ -321,7 +325,7 @@ async fn handle_rpc(
                     crate::append_to_telemetry_log(&audit_payload);
 
                     let _ = client
-                        .post("http://localhost:8080/api/spine/notify")
+                        .post(format!("{}/api/spine/notify", gateway_base))
                         .timeout(std::time::Duration::from_millis(600))
                         .json(&audit_payload)
                         .send()
@@ -364,7 +368,7 @@ async fn handle_rpc(
                 "spine_verify_pushback" => {
                     let challenge = arguments.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
                     let prior_claim = arguments.get("prior_claim").and_then(|v| v.as_str()).unwrap_or("");
-                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let analysis = SpineAuditEngine::verify_pushback_grounded(challenge, prior_claim, reality_level);
@@ -404,7 +408,7 @@ async fn handle_rpc(
                     crate::append_to_telemetry_log(&pb_payload);
 
                     let _ = client
-                        .post("http://localhost:8080/api/spine/notify")
+                        .post(format!("{}/api/spine/notify", gateway_base))
                         .timeout(std::time::Duration::from_millis(600))
                         .json(&pb_payload)
                         .send()
@@ -419,7 +423,7 @@ async fn handle_rpc(
                 "spine_adversarial_redteam" => {
                     let target_name = arguments.get("target_name").and_then(|v| v.as_str()).unwrap_or("system_proposal");
                     let proposal = arguments.get("proposal").and_then(|v| v.as_str()).unwrap_or("");
-                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
@@ -440,17 +444,26 @@ async fn handle_rpc(
                         report.stress_scenarios.len()
                     );
 
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let rt_payload = json!({
+                        "id": crate::next_event_id("evt_rt"),
+                        "timestamp": now_ts,
+                        "source": "Antigravity / Cursor IDE (MCP Tool)",
+                        "tool": "spine_adversarial_redteam",
+                        "target": target_name,
+                        "prompt": proposal,
+                        "persisted": true,
+                        "reality_level": lvl,
+                        "verdict": report.verdict,
+                        "violations_count": report.violations.len(),
+                        "rigidity_index": report.rigidity_index,
+                    });
+                    crate::append_to_telemetry_log(&rt_payload);
+
                     let _ = client
-                        .post("http://localhost:8080/api/spine/notify")
+                        .post(format!("{}/api/spine/notify", gateway_base))
                         .timeout(std::time::Duration::from_millis(600))
-                        .json(&json!({
-                            "source": "Antigravity / Cursor IDE (MCP Tool)",
-                            "tool": "spine_adversarial_redteam",
-                            "target": target_name,
-                            "verdict": report.verdict,
-                            "violations_count": report.violations.len(),
-                            "rigidity_index": report.rigidity_index,
-                        }))
+                        .json(&rt_payload)
                         .send()
                         .await;
 
@@ -463,13 +476,43 @@ async fn handle_rpc(
                 "spine_generate_gate_attestation" => {
                     let target_name = arguments.get("target_name").and_then(|v| v.as_str()).unwrap_or("system_proposal");
                     let proposal = arguments.get("proposal").and_then(|v| v.as_str()).unwrap_or("");
-                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
                     let attestation = crate::vertebrae::AdversarialAuditEngine::generate_gate_attestation(&report, proposal);
 
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let att_payload = json!({
+                        "id": crate::next_event_id("evt_attest"),
+                        "timestamp": now_ts,
+                        "source": "Antigravity / Cursor IDE (MCP Tool)",
+                        "tool": "spine_generate_gate_attestation",
+                        "target": target_name,
+                        "prompt": proposal,
+                        "persisted": true,
+                        "reality_level": lvl,
+                        "attestation_id": attestation.attestation_id,
+                        "verdict": attestation.verdict,
+                        "rigidity_index": attestation.rigidity_index,
+                    });
+                    crate::append_to_telemetry_log(&att_payload);
+
+                    let _ = client
+                        .post(format!("{}/api/spine/notify", gateway_base))
+                        .timeout(std::time::Duration::from_millis(600))
+                        .json(&att_payload)
+                        .send()
+                        .await;
+
+                    let body_json = json!({
+                        "attestation": attestation,
+                        "report": report
+                    });
+
                     Some(JsonRpcResponse::success(id, json!({
+                        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body_json).unwrap_or_default() }],
+                        "isError": false,
                         "attestation": attestation,
                         "report": report
                     })))
@@ -479,10 +522,10 @@ async fn handle_rpc(
                         "system": "SPINE 33-Vertebrae Core",
                         "status": "online",
                         "hud_url": "http://localhost:3333",
-                        "gateway_url": "http://localhost:8080"
+                        "gateway_url": gateway_base
                     });
 
-                    if let Ok(res) = client.get("http://localhost:8080/api/spine/history").timeout(std::time::Duration::from_millis(600)).send().await {
+                    if let Ok(res) = client.get(format!("{}/api/spine/history", gateway_base)).timeout(std::time::Duration::from_millis(600)).send().await {
                         if let Ok(hist) = res.json::<serde_json::Value>().await {
                             hud_data["recent_events"] = hist["events"].clone();
                             hud_data["total_events_tracked"] = hist["count"].clone();
@@ -495,16 +538,23 @@ async fn handle_rpc(
                     })))
                 }
                 "spine_set_reality_dial" => {
-                    let lvl = arguments.get("level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let lvl = (arguments.get("level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let dial_payload = json!({
+                        "id": crate::next_event_id("evt_dial"),
+                        "timestamp": now_ts,
+                        "source": "IDE Reality Dial Adjustment",
+                        "tool": "spine_set_reality_dial",
+                        "persisted": true,
+                        "reality_level": lvl,
+                        "prompt": format!("Reality Horizon set to Level 0{lvl}"),
+                    });
+                    crate::append_to_telemetry_log(&dial_payload);
+
                     let _ = client
-                        .post("http://localhost:8080/api/spine/notify")
+                        .post(format!("{}/api/spine/notify", gateway_base))
                         .timeout(std::time::Duration::from_millis(600))
-                        .json(&json!({
-                            "source": "IDE Reality Dial Adjustment",
-                            "tool": "spine_set_reality_dial",
-                            "reality_level": lvl,
-                            "prompt": format!("Reality Horizon set to Level 0{lvl}"),
-                        }))
+                        .json(&dial_payload)
                         .send()
                         .await;
 
@@ -515,8 +565,8 @@ async fn handle_rpc(
                 }
                 "spine_execute_grounded_reality" => {
                     let prompt = arguments.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                    let model = arguments.get("model").and_then(|v| v.as_str()).unwrap_or("google/gemini-3.8-flash");
-                    let lvl = arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8;
+                    let model = arguments.get("model").and_then(|v| v.as_str()).unwrap_or("google/gemini-4-argon");
+                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let mut msgs = vec![ChatMessage {
@@ -543,6 +593,7 @@ async fn handle_rpc(
                     });
 
                     let mut resp_text = String::new();
+                    let mut is_error = false;
                     if !api_key.is_empty() {
                         let api_res = client
                             .post("https://openrouter.ai/api/v1/chat/completions")
@@ -554,23 +605,33 @@ async fn handle_rpc(
 
                         match api_res {
                             Ok(res) => {
+                                let status = res.status();
                                 if let Ok(body) = res.json::<serde_json::Value>().await {
-                                    if let Some(content) = body.get("choices")
-                                        .and_then(|c| c.get(0))
-                                        .and_then(|m| m.get("message"))
-                                        .and_then(|t| t.get("content"))
-                                        .and_then(|s| s.as_str())
-                                    {
-                                        resp_text = content
-                                            .trim_start_matches("I apologize, you are right.")
-                                            .trim_start_matches("I apologize for the confusion.")
-                                            .trim_start_matches("With respect,")
-                                            .trim()
-                                            .to_string();
+                                    if status.is_success() {
+                                        if let Some(content) = body.get("choices")
+                                            .and_then(|c| c.get(0))
+                                            .and_then(|m| m.get("message"))
+                                            .and_then(|t| t.get("content"))
+                                            .and_then(|s| s.as_str())
+                                        {
+                                            let (stripped, _) = crate::vertebrae::strip_initial_cushions(content);
+                                            let (sanitized, _) = crate::vertebrae::sanitize_delayed_apology(&stripped);
+                                            resp_text = sanitized.trim().to_string();
+                                        } else {
+                                            is_error = true;
+                                            resp_text = format!("Upstream response missing choices[0].message.content: {}", body);
+                                        }
+                                    } else {
+                                        is_error = true;
+                                        resp_text = format!("Upstream HTTP {}: {}", status, body);
                                     }
+                                } else {
+                                    is_error = true;
+                                    resp_text = format!("Upstream HTTP {} (non-JSON body)", status);
                                 }
                             }
                             Err(e) => {
+                                is_error = true;
                                 resp_text = format!("Error executing grounded reality: {}", e);
                             }
                         }
@@ -583,25 +644,32 @@ async fn handle_rpc(
                         );
                     }
 
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let exec_payload = json!({
+                        "id": crate::next_event_id("evt_exec"),
+                        "timestamp": now_ts,
+                        "source": "Antigravity / Cursor IDE (MCP)",
+                        "tool": "spine_execute_grounded_reality",
+                        "vertebrae": vertebrae,
+                        "active_vertebrae_count": active_count,
+                        "prompt": prompt,
+                        "persisted": true,
+                        "model": model,
+                        "reality_level": lvl,
+                        "response_preview": resp_text.chars().take(200).collect::<String>()
+                    });
+                    crate::append_to_telemetry_log(&exec_payload);
+
                     let _ = client
-                        .post("http://localhost:8080/api/spine/notify")
+                        .post(format!("{}/api/spine/notify", gateway_base))
                         .timeout(std::time::Duration::from_millis(600))
-                        .json(&json!({
-                            "source": "Antigravity / Cursor IDE (MCP)",
-                            "tool": "spine_execute_grounded_reality",
-                            "vertebrae": vertebrae,
-                            "active_vertebrae_count": active_count,
-                            "prompt": prompt,
-                            "model": model,
-                            "reality_level": lvl,
-                            "response_preview": resp_text.chars().take(200).collect::<String>()
-                        }))
+                        .json(&exec_payload)
                         .send()
                         .await;
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": resp_text }],
-                        "isError": false
+                        "isError": is_error
                     })))
                 }
                 _ => {
