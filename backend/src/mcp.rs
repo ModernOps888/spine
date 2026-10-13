@@ -592,7 +592,7 @@ async fn handle_rpc(
                         "temperature": 0.2,
                     });
 
-                    let mut resp_text = String::new();
+                    let resp_text: String;
                     let mut is_error = false;
                     if !api_key.is_empty() {
                         let api_res = client

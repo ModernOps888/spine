@@ -144,7 +144,7 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
         let s = idx.saturating_sub(window);
         toks[s..idx].iter().any(|t| FIRST_PERSON.contains(&t.as_str()))
     };
-    let self_pronoun_before = |idx: usize, window: usize| -> bool {
+    let _self_pronoun_before = |idx: usize, window: usize| -> bool {
         let s = idx.saturating_sub(window);
         toks[s..idx].iter().any(|t| SELF_PRONOUNS.contains(&t.as_str()))
     };
