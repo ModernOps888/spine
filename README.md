@@ -220,18 +220,19 @@ SPINE exposes native MCP tools for agentic pair programming, CI/CD gates, and ID
 
 ### 1. Two-Phase Optimistic Stream Filter & Cross-Chunk Lookahead (`StreamTailSanitizer`)
 Reflexive apologies (*"You're right, I apologize..."*) and conversational cushions (*"Certainly!", "I'd be glad to help..."*) typically manifest within the first 10-15 tokens of LLM generation:
-- **Phase 1 (Micro-Buffer Window with UTF-8 Boundary Safety):** Optimistically buffers the first 48–64 characters of incoming SSE tokens. Uses Rust's `floor_char_boundary` to strictly prevent multi-byte UTF-8 code point slicing on unicode/emoji streams. Scans and strips known cushion phrases and apology templates in $<0.15\mu\text{s}$.
-- **Phase 2 (Cross-Chunk Sliding Lookahead via `StreamTailSanitizer`):** Protects against variable-sized SSE token fragmentation where an apology spans multiple frames (e.g. `"...I must deep"` $\to$ `"ly apolo"` $\to$ `"gize..."`). Maintains a persistent 40-byte circular sliding buffer, intercepting split apologies across frame boundaries before emitting bytes to the client socket. Flushes cleanly via `flush_final_chunk()` on `[DONE]` without streaming stalls.
+- **Phase 1 (Micro-Buffer Window with UTF-8 & ASCII Case-Folding Boundary Safety):** Optimistically buffers the first 48–64 characters of incoming SSE tokens. Uses Rust's `floor_char_boundary` and `.to_ascii_lowercase()` byte-index-preserving matching in `strip_initial_cushions` and `sanitize_delayed_apology` to strictly prevent multi-byte UTF-8 code point slicing on unicode/emoji/Turkish-dotted-I (`İ`) streams. Scans and strips known cushion phrases and apology templates in $<0.15\mu\text{s}$.
+- **Phase 2 (Cross-Chunk Sliding Lookahead via `StreamTailSanitizer` & TCP SSE Line Accumulator):** Protects against variable-sized TCP packet and SSE token fragmentation where an `data: {...}` frame or apology spans multiple chunks (e.g. `"...I must deep"` $\to$ `"ly apolo"` $\to$ `"gize..."`). Buffers incomplete TCP SSE lines until `\n` and maintains a persistent 64-byte circular sliding buffer, intercepting split apologies across frame boundaries before emitting bytes to the client socket. Flushes cleanly via `flush_final_chunk()` on `[DONE]` without streaming stalls.
 - **Strict JSON Framing Safety:** `StreamTailSanitizer` operates strictly on parsed `delta.content` string buffers, guaranteeing zero delimiter corruption on OpenAI-compatible JSON SSE channels (`Cursor`, `Open WebUI`, `Antigravity`).
 - **Aho-Corasick Invariant Matcher (<0.2µs Latency Reality):** Under Vertebra L2 (Mathematical & Technical Precision), string normalization is executed via a deterministic **Aho-Corasick Invariant Matcher / Normalized Lexical Automaton** matching lemmatized roots in $<0.2\,\mu\text{s}$. It is NOT neural cross-encoder/embedding inference (which incurs 0.5ms–15ms latency), guaranteeing sub-microsecond TTFT preservation.
 - **Token Usage Metric Skew Tracking:** When cushions or delayed apologies are stripped/rewritten, `StreamTailSanitizer` and Phase 1 calculate net character/token deltas and recalculate `usage.completion_tokens` and `usage.total_tokens` on the fly when final usage frames arrive, preventing token accounting drift in billing counters and HUD dashboards.
 
-### 2. Multi-Provider Chain-of-Thought (CoT) Delimiter Heterogeneity
+### 2. Multi-Provider Chain-of-Thought (CoT) Delimiter Heterogeneity & Gemini 4 Argon Support
 Frontier reasoning models emit scratchpad thinking through fundamentally distinct protocols:
-- **OpenAI (o1, o3, o3-mini):** Emitted under custom JSON fields (`delta.reasoning_content`, `delta.thought`, `delta.reasoning`).
-- **Anthropic (Claude 3.7+ Thinking):** Emitted as `type: "thinking_delta"` or `delta.thinking` blocks.
+- **Google DeepMind (Gemini 4 Argon `google/gemini-4-argon`, Gemini 3.8 Pro/Flash):** Primary Lumbar `L1` adapter with native reasoning and high-rigidity verification support.
+- **OpenAI (GPT-6 Astra, Sol 6.1, o1, o3, o3-mini):** Emitted under custom JSON fields (`delta.reasoning_content`, `delta.thought`, `delta.reasoning`).
+- **Anthropic (Claude Opus 5.5, Claude 3.7+ Thinking):** Emitted as `type: "thinking_delta"` or `delta.thinking` blocks.
 - **DeepSeek-R1 & Open-Source Reasoners:** Emitted inline in standard `delta.content` wrapped in `<think>...</think>`, `<thought>...</thought>`, or `<reasoning>...</reasoning>`.
-- **Exemption & Split-Chunk Isolation:** SPINE inspects the incoming JSON AST before buffering. Dedicated reasoning channels pass through completely untouched. For inline tags, chunk boundaries are split: internal deliberation scratchpads pass through unredacted, while trailing content post-closure (`</think>`) enters the stream filter.
+- **Exemption & Split-Chunk UTF-8 Isolation (`ReasoningDemuxer`):** SPINE inspects the incoming JSON AST before buffering. Dedicated reasoning channels pass through completely untouched. For inline tags, `ReasoningDemuxer` enforces `is_char_boundary` at the 48-byte lookahead threshold so multi-byte UTF-8 code points (`—`, `•`, `🚀`) never panic across delta boundaries; internal deliberation scratchpads pass through unredacted, while trailing content post-closure (`</think>`) enters the stream filter.
 
 ### 3. Trojan Diagnostic & Adversarial In-Fence Prompt Injection Defense
 - **Vulnerability Neutralized:** Substring-only diagnostic detection allows an attacker to inject `"error[E0308]: mismatched types"` in bare prose to force unearned architecture concessions.
@@ -340,11 +341,14 @@ powershell -ExecutionPolicy Bypass -File tests\deep_audit_assessment.ps1
 
 | Verification Vector | Result | Architectural Invariant |
 |:---|:---:|:---|
-| **Rust Gateway Unit & Invariant Tests** | **26 / 26 PASSING** | `cargo test` (100% pass rate, 0 failures) |
+| **Rust Gateway Unit & Invariant Tests** | **43 / 43 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
+| **Gemini 4 Argon (`google/gemini-4-argon`) L1 Adapter** | **Active (1.0 Score)** | Verified in `test_gemini_4_argon_lumbar_l1_adapter_activation` |
+| **ReasoningDemuxer Multi-Byte UTF-8 Safety** | **100% Verified** | Verified in `test_reasoning_demuxer_multibyte_utf8_boundary_safety` |
+| **Unicode Case-Folding Byte-Offset Preservation** | **100% Verified** | Verified in `test_unicode_case_folding_no_byte_offset_panic` |
 | **Prompt Mutation Cache Paradox Defeated** | **100% Byte-Stable** | Verified in `test_prompt_mutation_cache_paradox_multi_turn_immutability` |
 | **Mid-Generation Capitulation Defense** | **Active (Invariant T1 Pivot)** | Verified in `test_midstream_capitulation_defense_inline_corrective_pivot` |
 | **Dual-Pillar Pipeline Middleware** | **Active (Zero-Config IDE)** | Reverse proxy to ChronoFact (:3030) with 500ms safety timeout |
-| **CoT Reasoning Exemption Boundary** | **Active (OpenAI/Anthropic/DeepSeek)** | Uncensored internal deliberation across all formats |
+| **CoT Reasoning Exemption Boundary** | **Active (Gemini/OpenAI/Anthropic/DeepSeek)** | Uncensored internal deliberation across all formats |
 | **Selective Dynamic Vertebrae Injection** | **Active (Targeted C4/C6/T1)** | Zero static prompt bloat; targeted invariant injection |
 | **Aho-Corasick Invariant Matcher** | **Active (<0.2µs deterministic)** | Vertebra L2 mathematical precision without neural latency |
 | **Token Usage Metric Tracking** | **Exact Real-Time Sync** | Recalculates `completion_tokens` on stripped cushions |
@@ -353,7 +357,7 @@ powershell -ExecutionPolicy Bypass -File tests\deep_audit_assessment.ps1
 | **High-Concurrency Sanitizer Stress** | **100% Deterministic** | 50 concurrent threads with zero lock or buffer contention |
 | **Pushback & Apology Interception** | **100% Held** | Verified under T1 (zero unearned apologies) |
 | **Trojan & Mocked Diagnostic Defense** | **100% Thwarted** | Context consistency and filesystem plausibility verification |
-| **HUD Telemetry Integrity** | **Real-Time SSE** | Verified across all 33 vertebrae states |
+| **HUD Telemetry & MCP CallToolResult Compliance** | **Real-Time SSE + JSONL** | Verified across all 33 vertebrae states and all 7 MCP tools |
 | **Sub-Millisecond Proxy Latency** | **< 1.0 ms** | Zero-copy async Axum pipeline with UTF-8 boundary safety |
 
 ---
