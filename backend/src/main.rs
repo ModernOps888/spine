@@ -141,7 +141,7 @@ async fn health_handler() -> impl IntoResponse {
         "system": "SPINE Anti-Sycophancy Reality Gateway",
         "vertebrae_count": 33,
         "mode": "Dual Gateway + MCP HUD Server",
-        "version": "1.0.0"
+        "version": env!("CARGO_PKG_VERSION")
     }))
 }
 

@@ -128,7 +128,7 @@ async fn handle_rpc(
                 },
                 "serverInfo": {
                     "name": "spine",
-                    "version": "1.0.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             });
             Some(JsonRpcResponse::success(id, result))
