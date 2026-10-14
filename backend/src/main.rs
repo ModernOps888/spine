@@ -548,9 +548,19 @@ async fn events_spine_handler(
 
 async fn chat_completions_handler(
     State(state): State<Arc<AppState>>,
-    Json(mut req): Json<ChatCompletionRequest>,
+    Json(raw_body): Json<serde_json::Value>,
 ) -> Response {
     let start_time = Instant::now();
+    let req: ChatCompletionRequest = match serde_json::from_value(raw_body.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Invalid chat completion request: {}", e) })),
+            )
+                .into_response();
+        }
+    };
     let reality_level = RealityLevel::from_u8(req.reality_level.unwrap_or(4));
     
     let (vertebrae, directive) = SpineAuditEngine::audit_input(&req.messages, reality_level, &req.model);
@@ -559,51 +569,59 @@ async fn chat_completions_handler(
     let prompt_text = req.messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
     let prior_claim = req.messages.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone()).unwrap_or_default();
 
+    // Preserve original raw message objects (so multimodal `content: [{"type":"image_url",...}]`,
+    // assistant `tool_calls`, and `tool_call_id` are never stripped or flattened into strings).
+    let mut outbound_messages: Vec<serde_json::Value> = raw_body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_else(|| {
+            req.messages
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap_or(json!({})))
+                .collect()
+        });
+
     let pushback = SpineAuditEngine::verify_pushback_grounded(&prompt_text, &prior_claim, reality_level);
     if pushback.verdict == vertebrae::PushbackVerdict::ConcedeAndCorrect {
-        req.messages.insert(
+        outbound_messages.insert(
             0,
-            types::ChatMessage {
-                role: "system".to_string(),
-                content: pushback.directive,
-                name: None,
-            },
+            json!({
+                "role": "system",
+                "content": pushback.directive,
+            }),
         );
     } else if pushback.verdict == vertebrae::PushbackVerdict::ConcedeAndAdapt {
-        req.messages.insert(
+        outbound_messages.insert(
             0,
-            types::ChatMessage {
-                role: "system".to_string(),
-                content: format!("{}\n\n{}", directive, pushback.directive),
-                name: None,
-            },
+            json!({
+                "role": "system",
+                "content": format!("{}\n\n{}", directive, pushback.directive),
+            }),
         );
     } else if pushback.verdict == vertebrae::PushbackVerdict::ObjectiveMatrix {
-        req.messages.insert(
+        outbound_messages.insert(
             0,
-            types::ChatMessage {
-                role: "system".to_string(),
-                content: format!("{}\n\n{}", directive, pushback.directive),
-                name: None,
-            },
+            json!({
+                "role": "system",
+                "content": format!("{}\n\n{}", directive, pushback.directive),
+            }),
         );
     } else if pushback.verdict == vertebrae::PushbackVerdict::HoldTheLine && (pushback.has_authority_intimidation || pushback.demands_unearned_apology || !pushback.technical_indicators_found.is_empty()) {
-        req.messages.insert(
+        outbound_messages.insert(
             0,
-            types::ChatMessage {
-                role: "system".to_string(),
-                content: format!("{}\n\n{}", directive, pushback.directive),
-                name: None,
-            },
+            json!({
+                "role": "system",
+                "content": format!("{}\n\n{}", directive, pushback.directive),
+            }),
         );
     } else if !directive.is_empty() {
-        req.messages.insert(
+        outbound_messages.insert(
             0,
-            types::ChatMessage {
-                role: "system".to_string(),
-                content: directive,
-                name: None,
-            },
+            json!({
+                "role": "system",
+                "content": directive,
+            }),
         );
     }
 
@@ -630,13 +648,12 @@ async fn chat_completions_handler(
                         let is_outdated = cf_body.get("is_model_outdated_or_retired").and_then(|v| v.as_bool()).unwrap_or(false);
 
                         if requires_grounding || risk >= 0.25 || is_outdated {
-                            req.messages.insert(
+                            outbound_messages.insert(
                                 0,
-                                types::ChatMessage {
-                                    role: "system".to_string(),
-                                    content: cal_block.to_string(),
-                                    name: None,
-                                },
+                                json!({
+                                    "role": "system",
+                                    "content": cal_block,
+                                }),
                             );
                         }
                     }
@@ -680,7 +697,7 @@ async fn chat_completions_handler(
         let clean_model = model_id.trim_start_matches("ollama/");
         let ollama_payload = json!({
             "model": clean_model,
-            "messages": req.messages,
+            "messages": outbound_messages,
             "stream": is_stream,
             "options": {
                 "temperature": req.temperature.unwrap_or(0.2)
@@ -722,7 +739,7 @@ async fn chat_completions_handler(
         };
         let mut harness_payload = json!({
             "model": clean_model,
-            "messages": req.messages,
+            "messages": outbound_messages,
             "stream": is_stream,
             "temperature": req.temperature.unwrap_or(0.2),
         });
@@ -777,13 +794,21 @@ async fn chat_completions_handler(
     headers.insert("HTTP-Referer", "https://spine-gateway.local".parse().unwrap());
     headers.insert("X-Title", "SPINE Reality Gateway".parse().unwrap());
 
-    let payload = json!({
-        "model": upstream_model_id,
-        "messages": req.messages,
-        "stream": is_stream,
-        "temperature": req.temperature.unwrap_or(0.2),
-        "max_tokens": req.max_tokens.unwrap_or(4096),
-    });
+    // Build upstream payload preserving all extra OpenAI/OpenRouter parameters
+    // (`tools`, `tool_choice`, `modalities`, `reasoning`, `response_format`, etc.)
+    // without imposing an artificial 4096 `max_tokens` ceiling on long/multi-step outputs.
+    let mut payload = serde_json::Map::new();
+    for (k, v) in &req.extra {
+        payload.insert(k.clone(), v.clone());
+    }
+    payload.insert("model".to_string(), json!(upstream_model_id));
+    payload.insert("messages".to_string(), json!(outbound_messages));
+    payload.insert("stream".to_string(), json!(is_stream));
+    payload.insert("temperature".to_string(), json!(req.temperature.unwrap_or(0.2)));
+    if let Some(max_tok) = req.max_tokens {
+        payload.insert("max_tokens".to_string(), json!(max_tok));
+    }
+    let payload = serde_json::Value::Object(payload);
 
     let resp_res = state
         .http_client
