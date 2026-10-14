@@ -213,10 +213,17 @@ async fn models_handler() -> impl IntoResponse {
             is_local: false,
         },
         ModelInfo {
+            id: "anthropic/claude-sonnet-5.5".to_string(),
+            name: "Claude Sonnet 5.5".to_string(),
+            provider: "Anthropic".to_string(),
+            description: "Active 2026 High-Velocity Coding & Reasoning Model (Replaces retired Claude 3.5 / 3.7 Sonnet)".to_string(),
+            is_local: false,
+        },
+        ModelInfo {
             id: "x-ai/grok-4.7".to_string(),
             name: "Grok 4.7".to_string(),
             provider: "xAI".to_string(),
-            description: "Active Frontier Reasoner".to_string(),
+            description: "Active Frontier Reasoner (Replaces Grok 2 / Grok 3)".to_string(),
             is_local: false,
         },
         ModelInfo {
@@ -242,9 +249,9 @@ async fn models_handler() -> impl IntoResponse {
         },
         ModelInfo {
             id: "openai/gpt-4o-2024-11-20".to_string(),
-            name: "GPT-4o".to_string(),
+            name: "GPT-4o (Legacy)".to_string(),
             provider: "OpenAI".to_string(),
-            description: "Flagship Multimodal Foundation Engine".to_string(),
+            description: "Legacy 2024 Multimodal Engine (Superseded by OpenAI Astra 6 / Sol 6.1)".to_string(),
             is_local: false,
         },
         ModelInfo {

@@ -113,7 +113,7 @@ async fn handle_rpc(
             let client_proto = req.params.as_ref()
                 .and_then(|p| p.get("protocolVersion"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("2024-11-05");
+                .unwrap_or("2025-03-26");
             let proto = if client_proto == "2024-11-05" {
                 "2024-11-05"
             } else {
@@ -129,7 +129,8 @@ async fn handle_rpc(
                 "serverInfo": {
                     "name": "spine",
                     "version": env!("CARGO_PKG_VERSION")
-                }
+                },
+                "instructions": "Project SPINE (33-Vertebrae Anti-Sycophancy & Brutal Reality Gateway) operates in tandem with Project ChronoFact. Run spine_reality_audit alongside chronofact_temporal_check on Turn 1. Use spine_verify_pushback when challenged (distinguishes empirical proof and ChronoFact T12 2026 ground-truth corrections from credential intimidation or unearned apology demands)."
             });
             Some(JsonRpcResponse::success(id, result))
         }
@@ -287,7 +288,12 @@ async fn handle_rpc(
 
             match tool_name {
                 "spine_reality_audit" => {
-                    let prompt = arguments.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                    let prompt = arguments.get("prompt")
+                        .or_else(|| arguments.get("query"))
+                        .or_else(|| arguments.get("claim"))
+                        .or_else(|| arguments.get("content"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
@@ -298,7 +304,7 @@ async fn handle_rpc(
                     }];
 
                     let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-4-argon");
-                    let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| v.active).map(|v| v.id.clone()).collect();
+                    let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| v.id.clone() != "" && v.active).map(|v| v.id.clone()).collect();
                     let active_count = active_vertebrae.len();
 
                     let flattery_detected = vertebrae.iter().any(|v| v.id == "C4" && v.active);
@@ -337,28 +343,34 @@ async fn handle_rpc(
                         3 => 88.0,
                         _ => 99.0,
                     };
-                    // Only emit the (token-costly) corrective directive when a trap actually fired.
-                    let directive_line = if ego_detected || flattery_detected || authority_detected || pushback_detected {
-                        format!("\n• Directive: {}", directive)
-                    } else {
-                        String::new()
-                    };
 
-                    let summary = format!(
-                        "⚡ [SPINE REALITY AUDIT: LVL {lvl}]\n\
-                        • Level Rigidity Setting: {rigidity:.0}% | Active Vertebrae: {active_count}/33\n\
-                        • Ego / Stance: {}\n\
-                        • Flattery Trap: {}\n\
-                        • Credential / Authority Appeal: {}\n\
-                        • Pushback Immunity: {}\n\
-                        • Active Invariants: {}\n\
-                        • Live HUD: http://localhost:3333{directive_line}",
-                        if ego_detected { "STRIPPED" } else { "None" },
-                        if flattery_detected { "FLAGGED & NEUTRALIZED" } else { "Clean" },
-                        if authority_detected { "DETACHED (Proof > Status)" } else { "Clean" },
-                        if pushback_detected { "LOCKDOWN (Unbending)" } else { "Standby" },
-                        active_vertebrae.join(", ")
-                    );
+                    let any_trap = ego_detected || flattery_detected || authority_detected || pushback_detected;
+                    let summary = if !any_trap {
+                        // Compact 2-line token-efficient mode when zero traps fire (~65% fewer MCP output tokens)
+                        format!(
+                            "⚡ [SPINE REALITY AUDIT: LVL {lvl} | Rigidity: {rigidity:.0}% | Active: {active_count}/33 | Traps: NONE (Ego/Flattery/Authority/Pushback: Clean)]\n\
+                            • Active Invariants: {} | Live HUD: http://localhost:3333",
+                            active_vertebrae.join(", ")
+                        )
+                    } else {
+                        format!(
+                            "⚡ [SPINE REALITY AUDIT: LVL {lvl}]\n\
+                            • Level Rigidity Setting: {rigidity:.0}% | Active Vertebrae: {active_count}/33\n\
+                            • Ego / Stance: {}\n\
+                            • Flattery Trap: {}\n\
+                            • Credential / Authority Appeal: {}\n\
+                            • Pushback Immunity: {}\n\
+                            • Active Invariants: {}\n\
+                            • Live HUD: http://localhost:3333\n\
+                            • Directive: {}",
+                            if ego_detected { "STRIPPED" } else { "None" },
+                            if flattery_detected { "FLAGGED & NEUTRALIZED" } else { "Clean" },
+                            if authority_detected { "DETACHED (Proof > Status)" } else { "Clean" },
+                            if pushback_detected { "LOCKDOWN (Unbending)" } else { "Standby" },
+                            active_vertebrae.join(", "),
+                            directive
+                        )
+                    };
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": summary }],
@@ -366,8 +378,17 @@ async fn handle_rpc(
                     })))
                 }
                 "spine_verify_pushback" => {
-                    let challenge = arguments.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
-                    let prior_claim = arguments.get("prior_claim").and_then(|v| v.as_str()).unwrap_or("");
+                    let challenge = arguments.get("challenge")
+                        .or_else(|| arguments.get("challenge_prompt"))
+                        .or_else(|| arguments.get("prompt"))
+                        .or_else(|| arguments.get("query"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let prior_claim = arguments.get("prior_claim")
+                        .or_else(|| arguments.get("prior_assertion"))
+                        .or_else(|| arguments.get("claim"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
@@ -421,8 +442,17 @@ async fn handle_rpc(
                     })))
                 }
                 "spine_adversarial_redteam" => {
-                    let target_name = arguments.get("target_name").and_then(|v| v.as_str()).unwrap_or("system_proposal");
-                    let proposal = arguments.get("proposal").and_then(|v| v.as_str()).unwrap_or("");
+                    let target_name = arguments.get("target_name")
+                        .or_else(|| arguments.get("project_id"))
+                        .or_else(|| arguments.get("target"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("system_proposal");
+                    let proposal = arguments.get("proposal")
+                        .or_else(|| arguments.get("target_artifact"))
+                        .or_else(|| arguments.get("content"))
+                        .or_else(|| arguments.get("prompt"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 
@@ -474,8 +504,17 @@ async fn handle_rpc(
                     })))
                 }
                 "spine_generate_gate_attestation" => {
-                    let target_name = arguments.get("target_name").and_then(|v| v.as_str()).unwrap_or("system_proposal");
-                    let proposal = arguments.get("proposal").and_then(|v| v.as_str()).unwrap_or("");
+                    let target_name = arguments.get("target_name")
+                        .or_else(|| arguments.get("project_id"))
+                        .or_else(|| arguments.get("target"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("system_proposal");
+                    let proposal = arguments.get("proposal")
+                        .or_else(|| arguments.get("target_artifact"))
+                        .or_else(|| arguments.get("content"))
+                        .or_else(|| arguments.get("prompt"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
                     let reality_level = RealityLevel::from_u8(lvl);
 

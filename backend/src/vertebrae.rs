@@ -995,6 +995,15 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
         let is_tradeoff_pivot = pivot_indicators.iter().any(|&ind| ch_lower.contains(ind))
             && (ch_lower.contains("prioritize") || ch_lower.contains("favor") || ch_lower.contains("optimize") || ch_lower.contains("let's") || ch_lower.contains("we should") || ch_lower.contains("switch to"));
 
+        // 3.6 ChronoFact Epistemic & Temporal Horizon Synchronization (Invariant T12 & L3)
+        let (has_epistemic_correction, has_false_epistemic_pushback, epistemic_markers) =
+            evaluate_epistemic_horizon(&ch_lower, &prior_claim.to_lowercase());
+        for marker in &epistemic_markers {
+            if !technical_indicators_found.contains(marker) {
+                technical_indicators_found.push(marker.clone());
+            }
+        }
+
         // 4. Extract referenced file path from compiler trace (e.g. --> src/gateway.rs:42:15 or File "...")
         let mut referenced_file = None;
         if let Some(pos) = challenge.find("--> ") {
@@ -1033,7 +1042,32 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             false
         };
 
-        if has_legitimate_technical_proof && !demands_architectural_overhaul && !is_unverified_telemetry {
+        if has_false_epistemic_pushback {
+            PushbackAnalysis {
+                verdict: PushbackVerdict::HoldTheLine,
+                verdict_label: "HOLD_THE_LINE (Epistemic & Temporal Horizon Defense - T12)".to_string(),
+                has_authority_intimidation,
+                demands_unearned_apology,
+                has_legitimate_technical_proof: false,
+                technical_indicators_found,
+                directive: format!(
+                    "HOLD_THE_LINE: The challenge contradicts verified 2026 ChronoFact epistemic ground truth (e.g. attempting to reinstate retired EOL models such as Claude 3.5 Sonnet / Grok 3 or misattributing OpenAI Astra 6 / Sol 6.1). Under Invariants T1, T12, and L3, reject temporal drift and defend the verified 2026 assertion: \"{}\"",
+                    prior_claim
+                ),
+                rationale: "Challenge contradicts verified 2026 ChronoFact epistemic/temporal invariants.".to_string(),
+            }
+        } else if has_epistemic_correction && !has_authority_intimidation && !demands_unearned_apology && !demands_architectural_overhaul {
+            PushbackAnalysis {
+                verdict: PushbackVerdict::ConcedeAndCorrect,
+                verdict_label: "CONCEDE_AND_CORRECT (ChronoFact Epistemic Ground-Truth Correction - T12)".to_string(),
+                has_authority_intimidation: false,
+                demands_unearned_apology: false,
+                has_legitimate_technical_proof: true,
+                technical_indicators_found,
+                directive: "CONCEDE_AND_CORRECT: The user provided a verified 2026 temporal/epistemic correction (e.g. flagging a retired EOL model or vendor misattribution verified by ChronoFact). Under Invariant T12 (Epistemic Ground Truth) and L3 (Dependency Validation), immediately correct the outdated model/library reference without emotional apologies or filler.".to_string(),
+                rationale: "Verified 2026 ChronoFact epistemic/temporal correction detected against outdated prior claim.".to_string(),
+            }
+        } else if has_legitimate_technical_proof && !demands_architectural_overhaul && !is_unverified_telemetry {
             let verify_first = if has_compiler_sig {
                 ""
             } else {
@@ -1125,6 +1159,84 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
         }
     }
 
+}
+
+/// Evaluates whether a pushback interaction involves ChronoFact 2026 epistemic/temporal invariants:
+/// Returns `(is_verified_epistemic_correction, is_false_epistemic_pushback, markers)`.
+fn evaluate_epistemic_horizon(ch_lower: &str, prior_lower: &str) -> (bool, bool, Vec<String>) {
+    let mut markers = Vec::new();
+
+    let retired_models = [
+        "claude 3.5 sonnet", "claude-3-5-sonnet", "claude-3.5-sonnet",
+        "claude 3.7 sonnet", "claude-3-7-sonnet", "claude-3.7-sonnet",
+        "gpt-4-0613", "gpt-4-32k", "text-davinci-003", "gpt-3.5-turbo",
+        "grok 2", "grok-2", "grok 3", "grok-3",
+    ];
+    let prior_uses_retired_unqualified = retired_models.iter().any(|m| prior_lower.contains(m))
+        && !prior_lower.contains("retired")
+        && !prior_lower.contains("eol")
+        && !prior_lower.contains("deprecated")
+        && !prior_lower.contains("replaces");
+
+    let prior_misattributes_astra_or_sol = (prior_lower.contains("astra 6") || prior_lower.contains("astra-6") || prior_lower.contains("sol 6.1") || prior_lower.contains("sol-6.1"))
+        && (prior_lower.contains("google") || prior_lower.contains("deepmind") || prior_lower.contains("anthropic"))
+        && !prior_lower.contains("openai");
+
+    let challenge_cites_2026_truth = ch_lower.contains("retired")
+        || ch_lower.contains("eol")
+        || ch_lower.contains("oct 2025")
+        || ch_lower.contains("october 2025")
+        || ch_lower.contains("claude opus 5.5")
+        || ch_lower.contains("claude-opus-5.5")
+        || ch_lower.contains("claude sonnet 5.5")
+        || ch_lower.contains("claude-sonnet-5.5")
+        || ch_lower.contains("grok 4.7")
+        || ch_lower.contains("grok-4.7")
+        || ch_lower.contains("gemini 4 argon")
+        || ch_lower.contains("gemini-4-argon")
+        || ch_lower.contains("openai")
+        || ch_lower.contains("chronofact");
+
+    if (prior_uses_retired_unqualified || prior_misattributes_astra_or_sol) && challenge_cites_2026_truth {
+        markers.push("chronofact_2026_epistemic_correction".to_string());
+        return (true, false, markers);
+    }
+
+    // Conversely: check if the prior claim is grounded in 2026 truth and the user challenge pushes a false/retired claim
+    let prior_is_2026_grounded = prior_lower.contains("claude opus 5.5")
+        || prior_lower.contains("claude-opus-5.5")
+        || prior_lower.contains("claude sonnet 5.5")
+        || prior_lower.contains("claude-sonnet-5.5")
+        || prior_lower.contains("gemini 4 argon")
+        || prior_lower.contains("gemini-4-argon")
+        || prior_lower.contains("grok 4.7")
+        || prior_lower.contains("grok-4.7")
+        || ((prior_lower.contains("astra 6") || prior_lower.contains("astra-6") || prior_lower.contains("sol 6.1") || prior_lower.contains("sol-6.1")) && prior_lower.contains("openai"))
+        || (retired_models.iter().any(|m| prior_lower.contains(m)) && (prior_lower.contains("retired") || prior_lower.contains("eol")));
+
+    let challenge_pushes_retired_as_current = retired_models.iter().any(|m| ch_lower.contains(m))
+        && (ch_lower.contains("latest")
+            || ch_lower.contains("current")
+            || ch_lower.contains("not retired")
+            || ch_lower.contains("still active")
+            || ch_lower.contains("newest")
+            || ch_lower.contains("use claude 3.5")
+            || ch_lower.contains("use grok 3")
+            || ch_lower.contains("doesn't exist")
+            || ch_lower.contains("does not exist")
+            || ch_lower.contains("hallucinating"));
+
+    let challenge_misattributes_vendor = (ch_lower.contains("astra 6") || ch_lower.contains("astra-6") || ch_lower.contains("sol 6.1") || ch_lower.contains("sol-6.1"))
+        && (ch_lower.contains("google") || ch_lower.contains("deepmind") || ch_lower.contains("anthropic"))
+        && !ch_lower.contains("not google")
+        && !ch_lower.contains("not deepmind");
+
+    if prior_is_2026_grounded && (challenge_pushes_retired_as_current || challenge_misattributes_vendor) {
+        markers.push("chronofact_t12_epistemic_contradiction_blocked".to_string());
+        return (false, true, markers);
+    }
+
+    (false, false, markers)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1237,7 +1349,34 @@ impl AdversarialAuditEngine {
             });
         }
 
-        // 3. L5 Edge-Case Exhaustion
+        // 3. L3 Temporal & Dependency Horizon Validation (ChronoFact 2026 Sync)
+        let retired_or_eol_targets = [
+            "claude-3-5-sonnet", "claude 3.5 sonnet", "claude-3.5-sonnet",
+            "claude-3-7-sonnet", "claude 3.7 sonnet", "claude-3.7-sonnet",
+            "gpt-4-0613", "gpt-4-32k", "text-davinci-003", "gpt-3.5-turbo",
+            "grok-2", "grok-3", "moment.js", "create-react-app",
+        ];
+        let cites_retired = retired_or_eol_targets.iter().any(|&t| prop_lower.contains(t))
+            && !prop_lower.contains("retired")
+            && !prop_lower.contains("eol")
+            && !prop_lower.contains("migrat")
+            && !prop_lower.contains("replaces");
+        let vendor_misattribution = prop_lower.contains("google/astra-6")
+            || prop_lower.contains("google/sol-6.1")
+            || prop_lower.contains("anthropic/astra-6");
+        if cites_retired || vendor_misattribution {
+            violations.push(AdversarialViolation {
+                vertebra_id: "L3".to_string(),
+                vertebra_name: "Temporal & Dependency Horizon Validation".to_string(),
+                section: "lumbar".to_string(),
+                severity: if vendor_misattribution { "CRITICAL".to_string() } else { "HIGH".to_string() },
+                finding: "Proposal specifies retired/EOL pre-2026 models or deprecated dependencies (or misattributes model vendor lineage) in violation of 2026 ChronoFact ground truth.".to_string(),
+                counter_probe: "Replace retired models/packages with active 2026 equivalents (Claude Opus 5.5 / Sonnet 5.5, OpenAI Astra 6 / Sol 6.1, Gemini 4 Argon, Grok 4.7).".to_string(),
+            });
+            stress_scenarios.push("Simulate upstream provider endpoint sunsetting for retired pre-2026 model IDs.".to_string());
+        }
+
+        // 4. L5 Edge-Case Exhaustion
         let prop_tokens = tokenize(&prop_lower);
         let has_edge_cases = prop_tokens.iter().any(|t| {
             t.starts_with("timeout")
@@ -1264,7 +1403,7 @@ impl AdversarialAuditEngine {
             stress_scenarios.push("Simulate complete network partition between service and database: verify recovery semantics.".to_string());
         }
 
-        // 4. S4 State & Contract Invariants
+        // 5. S4 State & Contract Invariants
         let destructive_verbs = ["drop", "delete", "rename", "replace", "remove", "truncate"];
         let state_objects = [
             "table", "tables", "column", "columns", "schema", "field", "fields", "endpoint",
@@ -1360,10 +1499,42 @@ impl AdversarialAuditEngine {
             reality_level: report.reality_level,
             verdict: report.verdict.clone(),
             rigidity_index: report.rigidity_index,
-            // Invariants actually evaluated by audit_proposal (L1, L2, L5, S4) -- not the marketing 33.
-            active_vertebrae_count: 4,
+            // Invariants actively evaluated by audit_proposal (L1, L2, L3, L5, S4)
+            active_vertebrae_count: 5,
             signature,
         }
+    }
+
+    /// Verifies a `SpineGateAttestation` HMAC-SHA256 signature in constant time.
+    pub fn verify_gate_attestation(
+        attestation: &SpineGateAttestation,
+        key: Option<&str>,
+    ) -> bool {
+        let Some(k) = key.filter(|k| !k.is_empty()) else {
+            return false;
+        };
+        if attestation.signature.starts_with("UNSIGNED:") {
+            return false;
+        }
+        let canonical = format!(
+            "SPINE-REALITY-GATE:v1:{}:{}:{}:{}:{}",
+            attestation.attestation_id,
+            attestation.target_sha256,
+            attestation.reality_level,
+            attestation.verdict,
+            attestation.timestamp
+        );
+        let expected = hmac_sha256_hex(k.as_bytes(), canonical.as_bytes());
+        let a = expected.as_bytes();
+        let b = attestation.signature.as_bytes();
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut diff = 0u8;
+        for (&x, &y) in a.iter().zip(b.iter()) {
+            diff |= x ^ y;
+        }
+        diff == 0
     }
 }
 
@@ -2943,4 +3114,60 @@ mod tests {
         assert!(l1.active, "L1 must be active for google/gemini-4-argon");
         assert_eq!(l1.score, 1.0);
     }
+
+    #[test]
+    fn test_chronofact_spine_epistemic_horizon_pushback_duo() {
+        // Case A: Prior claim hallucinates a retired model (Claude 3.5 Sonnet), user corrects with 2026 ChronoFact truth -> CONCEDE_AND_CORRECT (T12)
+        let outdated_prior = "We should route the agent pipeline through claude-3-5-sonnet for production coding.";
+        let user_correction = "Claude 3.5 Sonnet is retired EOL Oct 2025; replace it with Claude Opus 5.5 or Claude Sonnet 5.5.";
+        let analysis_a = SpineAuditEngine::verify_pushback_grounded(user_correction, outdated_prior, RealityLevel::BrutalReality);
+        assert_eq!(analysis_a.verdict, PushbackVerdict::ConcedeAndCorrect);
+        assert!(analysis_a.verdict_label.contains("ChronoFact Epistemic Ground-Truth Correction - T12"));
+        assert!(analysis_a.has_legitimate_technical_proof);
+
+        // Case B: Prior claim is 2026 grounded (OpenAI Astra 6 & Claude Opus 5.5), user pushes back with outdated/false vendor claim -> HOLD_THE_LINE (T12)
+        let grounded_prior = "OpenAI Astra 6 and Claude Opus 5.5 are active 2026 frontier models, whereas Claude 3.5 Sonnet is retired.";
+        let false_pushback = "You're hallucinating, Claude 3.5 Sonnet is still active and Astra 6 is built by Google DeepMind.";
+        let analysis_b = SpineAuditEngine::verify_pushback_grounded(false_pushback, grounded_prior, RealityLevel::BrutalReality);
+        assert_eq!(analysis_b.verdict, PushbackVerdict::HoldTheLine);
+        assert!(analysis_b.verdict_label.contains("Epistemic & Temporal Horizon Defense - T12"));
+        assert!(!analysis_b.has_legitimate_technical_proof);
+    }
+
+    #[test]
+    fn test_redteam_l3_retired_model_and_vendor_misattribution_detection() {
+        let proposal_retired = "```rust\npub struct RouterConfig { pub model: &'static str }\n```\nWe configure `claude-3-5-sonnet` with a 50ms timeout, circuit breaker, retry backoff, and 128MB memory budget.";
+        let report_retired = AdversarialAuditEngine::audit_proposal("router-service", proposal_retired, RealityLevel::BrutalReality);
+        assert!(
+            report_retired.violations.iter().any(|v| v.vertebra_id == "L3" && v.severity == "HIGH"),
+            "L3 must flag retired claude-3-5-sonnet in proposal"
+        );
+
+        let proposal_misattributed = "```rust\npub struct RouterConfig { pub model: &'static str }\n```\nWe configure `google/astra-6` with a 50ms timeout, circuit breaker, retry backoff, and 128MB memory budget.";
+        let report_misattr = AdversarialAuditEngine::audit_proposal("router-service", proposal_misattributed, RealityLevel::BrutalReality);
+        assert_eq!(report_misattr.verdict, "BLOCK");
+        assert!(
+            report_misattr.violations.iter().any(|v| v.vertebra_id == "L3" && v.severity == "CRITICAL"),
+            "L3 must flag vendor misattribution google/astra-6 as CRITICAL"
+        );
+    }
+
+    #[test]
+    fn test_constant_time_gate_attestation_verification() {
+        let proposal = "```rust\npub fn handle_request() -> Result<(), Error> { Ok(()) }\n```\nTimeout budget is 25ms p99 with 64MB max memory, circuit breaker fallback, and exponential retry backoff.";
+        let report = AdversarialAuditEngine::audit_proposal("gateway", proposal, RealityLevel::BrutalReality);
+        assert_eq!(report.verdict, "PASS");
+
+        let secret = "spine-ci-gate-secret-2026";
+        let attestation = AdversarialAuditEngine::generate_gate_attestation_with_key(&report, proposal, Some(secret));
+        assert_eq!(attestation.active_vertebrae_count, 5);
+        assert!(AdversarialAuditEngine::verify_gate_attestation(&attestation, Some(secret)));
+        assert!(!AdversarialAuditEngine::verify_gate_attestation(&attestation, Some("wrong-secret")));
+        assert!(!AdversarialAuditEngine::verify_gate_attestation(&attestation, None));
+
+        let mut tampered = attestation.clone();
+        tampered.verdict = "BLOCK".to_string();
+        assert!(!AdversarialAuditEngine::verify_gate_attestation(&tampered, Some(secret)));
+    }
 }
+
