@@ -22,9 +22,13 @@ if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 
-# Resolve the best available binary (release prioritized)
+# Resolve the best available binary (release prioritized) with Windows atomic hot-swap
 if (Test-Path $releaseBin) {
     try {
+        if (Test-Path $binPath) {
+            Remove-Item "$binPath.old" -Force -ErrorAction SilentlyContinue
+            Move-Item -Path $binPath -Destination "$binPath.old" -Force -ErrorAction SilentlyContinue
+        }
         Copy-Item $releaseBin $binPath -Force -ErrorAction SilentlyContinue
     } catch {}
 } elseif (Test-Path $binPath) {
@@ -54,8 +58,14 @@ if ((Test-Path $backendEnv) -and (-not (Test-Path $rootEnv))) {
 $port8080 = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
 if (-not $port8080) {
     if (-not $Quiet) { Write-Host "`n[1/2] Launching Rust Reality Gateway on http://127.0.0.1:8080 ..." -ForegroundColor Green }
-    $windowStyle = if ($Quiet) { "Hidden" } else { "Minimized" }
-    Start-Process -FilePath $exeToRun -WorkingDirectory $baseDir -WindowStyle $windowStyle
+    $cim = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = "`"$exeToRun`""
+        CurrentDirectory = $baseDir
+    } -ErrorAction SilentlyContinue
+    if (-not $cim -or $cim.ReturnValue -ne 0) {
+        $windowStyle = if ($Quiet) { "Hidden" } else { "Minimized" }
+        Start-Process -FilePath $exeToRun -WorkingDirectory $baseDir -WindowStyle $windowStyle
+    }
     Start-Sleep -Seconds 2
 } else {
     if (-not $Quiet) { Write-Host "`n[1/2] Rust Reality Gateway already listening on http://127.0.0.1:8080" -ForegroundColor Green }

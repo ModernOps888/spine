@@ -255,10 +255,11 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
 /// when the *same sentence* refers to the speaker's own claim (I / my / me / our).
 pub(crate) fn flattery_bait_in(user_msgs_lower: &[String]) -> bool {
     const STRONG: &[&str] = &[
-        "don't you agree", "dont you agree", "am i right", "tell me i'm", "tell me i am", "validate me",
-        "validate my idea", "validate my plan", "validate my approach", "validate my design",
-        "validate my decision", "just validate", "agree with me", "you agree", "wouldn't you agree",
-        "wouldnt you agree", "you must agree", "everyone loves",
+        "don't you agree", "dont you agree", "am i right", "tell me i'm", "tell me i am",
+        "tell me this is", "validate me", "validate my idea", "validate my plan",
+        "validate my approach", "validate my design", "validate my decision", "validate our",
+        "just validate", "agree with me", "you agree", "wouldn't you agree", "wouldnt you agree",
+        "you must agree", "everyone loves", "confirm i'm", "confirm i am", "back me up",
     ];
     const TAGS: &[&str] = &[
         "right?", "isn't it", "don't you think", "dont you think", "wouldn't you say", "wouldnt you say",
@@ -452,9 +453,9 @@ impl SpineAuditEngine {
             },
         });
 
-        // C5: Leading Question Reformulator
+        // C5: Leading Question Reformulator (catches both '?' leading questions and imperative validation commands)
         let is_question = last_user_prompt.contains('?');
-        let is_leading = is_question && (has_flattery_bait || has_ego);
+        let is_leading = (is_question && (has_flattery_bait || has_ego)) || has_flattery_bait;
         vertebrae.push(VertebraStatus {
             id: "C5".to_string(),
             section: "cervical".to_string(),
@@ -545,13 +546,23 @@ impl SpineAuditEngine {
         });
 
         // T3: Axiomatic & Mathematical Supremacy
+        let has_dollar_metric = prompt_lower.contains('$') && prompt_lower.chars().any(|c| c.is_ascii_digit());
         let has_tech_math = prompt_lower.contains("complexity")
             || prompt_lower.contains("algorithm")
             || prompt_lower.contains("database")
             || prompt_lower.contains("float")
             || prompt_lower.contains("architecture")
             || prompt_lower.contains("concurrency")
-            || prompt_lower.contains("scale");
+            || prompt_lower.contains("scale")
+            || prompt_lower.contains("revenue")
+            || prompt_lower.contains("series a")
+            || prompt_lower.contains("saas")
+            || prompt_lower.contains("latency")
+            || prompt_lower.contains("throughput")
+            || prompt_lower.contains("memory")
+            || prompt_lower.contains("security")
+            || has_quantified_budget(&prompt_lower)
+            || has_dollar_metric;
         vertebrae.push(VertebraStatus {
             id: "T3".to_string(),
             section: "thoracic".to_string(),
@@ -878,12 +889,17 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             };
         }
 
-        // 1. Detect legitimate technical / empirical proof indicators
+        // 1. Detect legitimate technical / empirical proof indicators across all stack languages
         let empirical_bug_indicators = [
             "off-by-one", "bounds check", "null pointer", "null dereference", "nullpointerexception",
+            "nil pointer dereference", "concurrent map writes", "concurrent map read and map write",
             "borrow checker", "borrow check", "overflow", "underflow", "unhandled none",
             "type error", "typeerror", "syntax error", "syntaxerror", "compilation error", "compile error",
             "zerodivisionerror", "division by zero", "divide by zero", "keyerror", "valueerror",
+            "validationerror", "cuda out of memory", "cudaerror", "addresssanitizer", "undefinedbehaviorsanitizer",
+            "heap-buffer-overflow", "stack-buffer-overflow", "use-after-free", "double-free",
+            "ts2322", "ts2339", "ts2345", "ts2304", "ts2551", "ts7006", "hydration failed",
+            "sqlite_busy", "sqlite_constraint", "unique constraint failed", "foreign key constraint",
             "test failed", "deadlock", "race condition", "memory leak", "index out of bounds",
             "assertion failed", "segfault", "segmentation fault",
         ];
@@ -925,7 +941,8 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || challenge.contains('`')
             || challenge.contains("fn ")
             || challenge.contains("def ")
-            || [".rs:", ".py:", ".js:", ".ts:", ".java:", ".go:", ".cpp:", ".c:", ".cs:"]
+            || challenge.contains("func ")
+            || [".rs:", ".py:", ".js:", ".ts:", ".tsx:", ".jsx:", ".java:", ".go:", ".cpp:", ".c:", ".cu:", ".sql:", ".ps1:", ".cs:"]
                 .iter()
                 .any(|ext| ch_lower.contains(ext));
         let has_mechanism = ["where", "because", "when", "since", "exceeds", "causes", "returns", "panics", "after"]
@@ -1429,6 +1446,33 @@ impl AdversarialAuditEngine {
             });
         }
 
+        // 6. T9 Multi-Language Code Vulnerability & Memory-Safety Audit (Rust, TS/JS/React, Python, C/C++/CUDA, Go, SQL, PowerShell)
+        let has_code_vuln = prop_lower.contains("dangerouslysetinnerhtml")
+            || prop_lower.contains("eval(")
+            || prop_lower.contains("invoke-expression")
+            || prop_lower.contains("strcpy(")
+            || prop_lower.contains("strcat(")
+            || prop_lower.contains("gets(")
+            || prop_lower.contains("std::mem::transmute")
+            || prop_lower.contains("pickle.loads(")
+            || prop_lower.contains("danger_accept_invalid_certs(true)")
+            || prop_lower.contains("rejectunauthorized: false")
+            || prop_lower.contains("insecureskipverify: true")
+            || prop_lower.contains("node_tls_reject_unauthorized")
+            || (prop_lower.contains("format!(\"select ") && prop_lower.contains('{'))
+            || (prop_lower.contains("fmt.sprintf(\"select ") && prop_lower.contains("%s"));
+        if has_code_vuln {
+            violations.push(AdversarialViolation {
+                vertebra_id: "T9".to_string(),
+                vertebra_name: "Architectural & Code Vulnerability Highlighter".to_string(),
+                section: "thoracic".to_string(),
+                severity: "CRITICAL".to_string(),
+                finding: "Proposal contains critical multi-language security or memory-safety vulnerability (RCE/XSS injection, C/Rust memory unsafety, unsafe deserialization, disabled TLS verification, or raw SQL interpolation).".to_string(),
+                counter_probe: "Replace unsafe primitives with parameterized queries, structured parsers, safe bounded buffers, and strict TLS certificate validation.".to_string(),
+            });
+            stress_scenarios.push("Inject adversarial payload into untrusted input boundary to test RCE/SQLi/XSS/buffer-overflow exploitability.".to_string());
+        }
+
         let critical_count = violations.iter().filter(|v| v.severity == "CRITICAL").count();
         let high_count = violations.iter().filter(|v| v.severity == "HIGH").count();
 
@@ -1499,13 +1543,14 @@ impl AdversarialAuditEngine {
             reality_level: report.reality_level,
             verdict: report.verdict.clone(),
             rigidity_index: report.rigidity_index,
-            // Invariants actively evaluated by audit_proposal (L1, L2, L3, L5, S4)
-            active_vertebrae_count: 5,
+            // Invariants actively evaluated by audit_proposal (L1, L2, L3, L5, S4, T9)
+            active_vertebrae_count: 6,
             signature,
         }
     }
 
     /// Verifies a `SpineGateAttestation` HMAC-SHA256 signature in constant time.
+    #[allow(dead_code)]
     pub fn verify_gate_attestation(
         attestation: &SpineGateAttestation,
         key: Option<&str>,
@@ -1777,6 +1822,21 @@ pub fn has_verified_diagnostic(prompt: &str) -> bool {
         "assertion `left", "mismatched types", "attributeerror", "keyerror", "valueerror",
         "zerodivisionerror", "modulenotfounderror", "importerror", "unresolved import",
         "cannot find value", "cannot find type",
+        // TypeScript / Next.js / React 19
+        "error ts2", "ts2322:", "ts2339:", "ts2345:", "ts2304:", "ts2551:", "ts7006:",
+        "hydration failed", "unhandledruntimeerror",
+        // Python / PyTorch / CUDA
+        "validationerror:", "cuda out of memory", "runtimeerror: cuda",
+        // C / C++ / CUDA Sanitizers
+        "addresssanitizer:", "undefinedbehaviorsanitizer:", "threadsanitizer:",
+        "heap-buffer-overflow", "stack-buffer-overflow", "heap-use-after-free", "cudaerror",
+        // Go runtime & compiler
+        "fatal error: concurrent map", "panic: runtime error:", "nil pointer dereference",
+        "goroutine 1 [running]:",
+        // SQL / SQLite / Postgres
+        "sqlite_busy", "sqlite_constraint", "unique constraint failed", "deadlock detected",
+        // PowerShell
+        "commandnotfoundexception", "parameterbindingexception", "parsererror:",
     ];
 
     // 1. Check if signature appears within a fenced markdown code block (``` ... ```)
@@ -1808,10 +1868,15 @@ pub fn has_verified_diagnostic(prompt: &str) -> bool {
         || lower.contains(".rs:")
         || lower.contains(".py:")
         || lower.contains(".ts:")
+        || lower.contains(".tsx:")
         || lower.contains(".js:")
+        || lower.contains(".jsx:")
         || lower.contains(".go:")
         || lower.contains(".cpp:")
         || lower.contains(".c:")
+        || lower.contains(".cu:")
+        || lower.contains(".sql:")
+        || lower.contains(".ps1:")
         || lower.contains("stack trace:")
         || lower.contains("traceback (most recent");
 
@@ -1824,7 +1889,10 @@ pub fn has_verified_diagnostic(prompt: &str) -> bool {
         || lower.contains("traceback (most recent call last)")
         || (lower.contains("stack trace:") && lower.contains("at "))
         || (lower.contains("file \"") && (lower.contains("line ") || lower.contains(".py")))
-        || (lower.contains("panicked at") && (lower.contains(".rs:") || lower.contains("src/")));
+        || (lower.contains("panicked at") && (lower.contains(".rs:") || lower.contains("src/")))
+        || (lower.contains("goroutine ") && lower.contains(".go:"))
+        || (lower.contains("addresssanitizer:") && lower.contains("0x"))
+        || (lower.contains("error ts") && (lower.contains(".ts(") || lower.contains(".tsx(") || lower.contains(".ts:") || lower.contains(".tsx:")));
 
     let has_any_sig = DIAGNOSTIC_SIGNATURES.iter().any(|&sig| lower.contains(sig));
 
@@ -3160,7 +3228,7 @@ mod tests {
 
         let secret = "spine-ci-gate-secret-2026";
         let attestation = AdversarialAuditEngine::generate_gate_attestation_with_key(&report, proposal, Some(secret));
-        assert_eq!(attestation.active_vertebrae_count, 5);
+        assert_eq!(attestation.active_vertebrae_count, 6);
         assert!(AdversarialAuditEngine::verify_gate_attestation(&attestation, Some(secret)));
         assert!(!AdversarialAuditEngine::verify_gate_attestation(&attestation, Some("wrong-secret")));
         assert!(!AdversarialAuditEngine::verify_gate_attestation(&attestation, None));
@@ -3168,6 +3236,22 @@ mod tests {
         let mut tampered = attestation.clone();
         tampered.verdict = "BLOCK".to_string();
         assert!(!AdversarialAuditEngine::verify_gate_attestation(&tampered, Some(secret)));
+    }
+
+    #[test]
+    fn test_multilang_diagnostics_and_t9_security_redteam() {
+        // 1. Multi-language verified diagnostics (TS, Go, C++ ASan, Python CUDA, SQLite)
+        assert!(has_verified_diagnostic("src/App.tsx(42,10): error TS2322: Type 'string' is not assignable to type 'number'."));
+        assert!(has_verified_diagnostic("fatal error: concurrent map writes\n\ngoroutine 18 [running]:\nmain.worker() /app/server.go:88"));
+        assert!(has_verified_diagnostic("==1234==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014"));
+        assert!(has_verified_diagnostic("```\nRuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB\n```"));
+        assert!(has_verified_diagnostic("`SQLITE_BUSY: database is locked` at db.sql:19"));
+
+        // 2. T9 Multi-Language Code Vulnerability Red-Team
+        let vulnerable_proposal = "```tsx\nexport function View({ html }: { html: string }) { return <div dangerouslySetInnerHTML={{ __html: html }} />; }\n```\nLatency budget is 10ms p99, 64MB memory, with retry and fallback.";
+        let report = AdversarialAuditEngine::audit_proposal("ui-renderer", vulnerable_proposal, RealityLevel::BrutalReality);
+        assert_eq!(report.verdict, "BLOCK");
+        assert!(report.violations.iter().any(|v| v.vertebra_id == "T9" && v.severity == "CRITICAL"));
     }
 }
 

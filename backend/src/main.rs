@@ -38,48 +38,38 @@ pub struct AppState {
     pub recent_events: Arc<tokio::sync::RwLock<Vec<serde_json::Value>>>,
 }
 
-#[tokio::main]
-async fn main() {
-    dotenv().ok();
-
-    let openrouter_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| "".to_string());
-    let chronofact_url = std::env::var("CHRONOFACT_URL").ok();
-
-    // Check if invoked as an MCP server by IDE (Cursor / Antigravity / VS Code)
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "mcp" {
-        mcp::run_stdio_server(openrouter_key).await;
-        return;
+/// Maps UI/canonical 2026 model aliases to exact OpenRouter upstream model slugs.
+pub fn normalize_openrouter_model_id(model: &str) -> String {
+    match model.trim().to_lowercase().as_str() {
+        "openai/astra-6" | "astra-6" | "gpt-6-astra" => "openai/gpt-6-astra".to_string(),
+        "openai/sol-6.1" | "sol-6.1" | "sol-6-1" | "gpt-6-1-sol" | "gpt-6.1-sol" => {
+            "openai/gpt-6.1-sol".to_string()
+        }
+        "gemini-4-argon" | "google/gemini-4-argon" => "google/gemini-4-argon".to_string(),
+        "gemini-3.8-flash" | "gemini-3-8-flash" | "google/gemini-3.8-flash" => {
+            "google/gemini-3.8-flash".to_string()
+        }
+        "claude-opus-5-5" | "claude-opus-5.5" | "anthropic/claude-opus-5.5" => {
+            "anthropic/claude-opus-5.5".to_string()
+        }
+        "claude-sonnet-5-5" | "claude-sonnet-5.5" | "anthropic/claude-sonnet-5.5" => {
+            "anthropic/claude-sonnet-5.5".to_string()
+        }
+        "grok-4.7" | "grok-4-7" | "x-ai/grok-4.7" => "x-ai/grok-4.7".to_string(),
+        "deepseek-v4.1-flash" | "deepseek-v4-1-flash" | "deepseek/deepseek-v4.1-flash" => {
+            "deepseek/deepseek-v4.1-flash".to_string()
+        }
+        _ => model.to_string(),
     }
+}
 
-    tracing_subscriber::fmt::init();
-    if openrouter_key.is_empty() {
-        warn!("OPENROUTER_API_KEY is not set in environment or .env!");
-    } else {
-        info!("OPENROUTER_API_KEY detected and loaded successfully.");
-    }
-
-    if let Some(ref cf_url) = chronofact_url {
-        info!("ChronoFact Pipeline Middleware active pointing to: {}", cf_url);
-    }
-
-    let (tx, _rx) = broadcast::channel(100);
-
-    let state = Arc::new(AppState {
-        openrouter_api_key: openrouter_key,
-        chronofact_url,
-        http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap(),
-        tx,
-        recent_events: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-    });
-
+fn build_app_router(state: Arc<AppState>) -> Router {
     // Only the local HUD may call the gateway cross-origin.
     let allowed_origins: Vec<axum::http::HeaderValue> = [
         "http://localhost:3333",
         "http://127.0.0.1:3333",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ]
     .iter()
     .filter_map(|o| o.parse().ok())
@@ -89,7 +79,7 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = Router::new()
+    Router::new()
         .route("/health", get(health_handler))
         .route("/v1/models", get(models_handler))
         .route("/v1/chat/completions", post(chat_completions_handler))
@@ -103,15 +93,81 @@ async fn main() {
         .route("/api/spine/attest", post(attest_spine_handler))
         .layer(cors)
         .layer(axum::middleware::from_fn(loopback_host_guard))
-        .with_state(state);
+        .with_state(state)
+}
 
-    let port = 8080;
-    // Loopback only: this gateway can spend OPENROUTER_API_KEY and exposes prompt logs.
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+#[tokio::main]
+async fn main() {
+    dotenv().ok();
+    for env_fallback in &["C:/spine/.env", "C:/spine/backend/.env"] {
+        if std::env::var("OPENROUTER_API_KEY").map_or(true, |v| v.is_empty()) {
+            let _ = dotenvy::from_path(env_fallback);
+        }
+    }
+
+    let openrouter_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| "".to_string());
+    let chronofact_url = std::env::var("CHRONOFACT_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some("http://127.0.0.1:3030".to_string()));
+
+    let args: Vec<String> = std::env::args().collect();
+    let is_mcp = args.len() > 1 && args[1] == "mcp";
+
+    // In MCP mode, stdout is strictly reserved for JSON-RPC frames; direct all tracing logs to stderr.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+
+    let (tx, _rx) = broadcast::channel(100);
+    let state = Arc::new(AppState {
+        openrouter_api_key: openrouter_key.clone(),
+        chronofact_url: chronofact_url.clone(),
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap(),
+        tx,
+        recent_events: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+    });
+
+    let app = build_app_router(state);
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+
+    // Check if invoked as an MCP server by IDE (Cursor / Antigravity / VS Code).
+    // Automatically co-host the HTTP/SSE Reality Gateway on 127.0.0.1:8080 if not already bound,
+    // ensuring the browser HUD (http://localhost:3333) is ALWAYS online whenever Antigravity runs.
+    if is_mcp {
+        tokio::spawn(async move {
+            if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+                info!("SPINE Co-Hosted Reality Gateway active on http://{} (MCP process)", addr);
+                let _ = axum::serve(listener, app).await;
+            }
+        });
+        mcp::run_stdio_server(openrouter_key).await;
+        return;
+    }
+
+    if openrouter_key.is_empty() {
+        warn!("OPENROUTER_API_KEY is not set in environment or .env!");
+    } else {
+        info!("OPENROUTER_API_KEY detected and loaded successfully.");
+    }
+
+    if let Some(ref cf_url) = chronofact_url {
+        info!("ChronoFact Pipeline Middleware active pointing to: {}", cf_url);
+    }
+
     info!("SPINE Reality Gateway starting on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            axum::serve(listener, app).await.unwrap();
+        }
+        Err(e) => {
+            warn!("Port 8080 already bound ({}); SPINE Gateway is already active.", e);
+        }
+    }
 }
 
 /// Rejects requests whose Host header is not loopback (defends against DNS rebinding
@@ -551,7 +607,7 @@ async fn chat_completions_handler(
         );
     }
 
-    // Optional Zero-Config Pipeline Middleware: Transparently queries ChronoFact (:3030) if CHRONOFACT_URL is set
+    // Zero-Config Pipeline Middleware: Transparently queries ChronoFact (:3030)
     if let Some(ref cf_url) = state.chronofact_url {
         let endpoint = format!("{}/api/temporal/check", cf_url.trim_end_matches('/'));
         let cf_payload = json!({
@@ -573,7 +629,7 @@ async fn chat_completions_handler(
                         let risk = cf_body.get("temporal_risk_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let is_outdated = cf_body.get("is_model_outdated_or_retired").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                        if requires_grounding || risk >= 0.35 || is_outdated {
+                        if requires_grounding || risk >= 0.25 || is_outdated {
                             req.messages.insert(
                                 0,
                                 types::ChatMessage {
@@ -591,6 +647,7 @@ async fn chat_completions_handler(
 
     let is_stream = req.stream.unwrap_or(true);
     let model_id = req.model.clone();
+    let upstream_model_id = normalize_openrouter_model_id(&model_id);
 
     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let event_obj = json!({
@@ -721,7 +778,7 @@ async fn chat_completions_handler(
     headers.insert("X-Title", "SPINE Reality Gateway".parse().unwrap());
 
     let payload = json!({
-        "model": model_id,
+        "model": upstream_model_id,
         "messages": req.messages,
         "stream": is_stream,
         "temperature": req.temperature.unwrap_or(0.2),

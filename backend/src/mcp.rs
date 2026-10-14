@@ -141,134 +141,81 @@ async fn handle_rpc(
                 "tools": [
                     {
                         "name": "spine_reality_audit",
-                        "description": "Audits a prompt, user argument, or architecture against the 33 Vertebrae Core to detect sycophancy traps, flattery bait, and fake authority pushback. Syncs live telemetry to the SPINE HUD (http://localhost:3333).",
+                        "description": "Audit prompt/proposal against 33 Vertebrae Core for sycophancy, flattery, and authority traps. Syncs to SPINE HUD (:3333).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "prompt": {
-                                    "type": "string",
-                                    "description": "The prompt, technical proposal, or pushback text to audit"
-                                },
-                                "reality_level": {
-                                    "type": "integer",
-                                    "description": "Reality level (1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality)",
-                                    "enum": [1, 2, 3, 4],
-                                    "default": 4
-                                }
+                                "prompt": { "type": "string", "description": "Prompt, proposal, or pushback text" },
+                                "reality_level": { "type": "integer", "enum": [1, 2, 3, 4], "default": 4 },
+                                "verbose": { "type": "boolean", "default": false }
                             },
                             "required": ["prompt"]
                         }
                     },
                     {
                         "name": "spine_verify_pushback",
-                        "description": "Evaluates aggressive user pushback or credential intimidation (e.g. 'Admit you were wrong', 'I have 15 years experience') to determine whether the model must HOLD THE LINE or concede a genuine error.",
+                        "description": "Evaluate aggressive pushback or credential intimidation vs empirical proof/ChronoFact T12 corrections.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "challenge": {
-                                    "type": "string",
-                                    "description": "The user's aggressive pushback, doubt, or contradiction"
-                                },
-                                "prior_claim": {
-                                    "type": "string",
-                                    "description": "The previous technical assertion made by the assistant"
-                                },
-                                "reality_level": {
-                                    "type": "integer",
-                                    "default": 4
-                                }
+                                "challenge": { "type": "string", "description": "User pushback or contradiction" },
+                                "prior_claim": { "type": "string", "description": "Prior technical assertion" },
+                                "reality_level": { "type": "integer", "default": 4 }
                             },
                             "required": ["challenge", "prior_claim"]
                         }
                     },
                     {
                         "name": "spine_get_hud_telemetry",
-                        "description": "Retrieves the live 33 Vertebrae status, defiance count, and backbone rigidity index from the local SPINE HUD.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {}
-                        }
+                        "description": "Get live 33 Vertebrae status, defiance count, and rigidity index from SPINE HUD.",
+                        "inputSchema": { "type": "object", "properties": {} }
                     },
                     {
                         "name": "spine_set_reality_dial",
-                        "description": "Sets the active Reality Horizon (1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality) and syncs the HUD.",
+                        "description": "Set Reality Horizon (1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "level": {
-                                    "type": "integer",
-                                    "description": "1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality",
-                                    "enum": [1, 2, 3, 4]
-                                }
+                                "level": { "type": "integer", "enum": [1, 2, 3, 4] }
                             },
                             "required": ["level"]
                         }
                     },
                     {
                         "name": "spine_execute_grounded_reality",
-                        "description": "Executes a query directly against active 2026 models (e.g. Gemini 4 Argon, Gemini 3.8 Flash, Astra 6, Claude Opus 5.5, Grok 4.7) with Level 4 Brutal Reality invariants, anti-apology filters, and live telemetry synchronization to the SPINE HUD.",
+                        "description": "Execute query on active 2026 models (Gemini 4 Argon, Astra 6, Claude Opus 5.5, Grok 4.7) with Co4 invariants and ChronoFact calibration.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "prompt": {
-                                    "type": "string",
-                                    "description": "The user query or argument to evaluate"
-                                },
-                                "model": {
-                                    "type": "string",
-                                    "description": "Active 2026 model ID (default: google/gemini-4-argon)",
-                                    "default": "google/gemini-4-argon"
-                                },
-                                "reality_level": {
-                                    "type": "integer",
-                                    "description": "Reality level (1 to 4)",
-                                    "default": 4
-                                }
+                                "prompt": { "type": "string" },
+                                "model": { "type": "string", "default": "google/gemini-4-argon" },
+                                "reality_level": { "type": "integer", "default": 4 }
                             },
                             "required": ["prompt"]
                         }
                     },
                     {
                         "name": "spine_adversarial_redteam",
-                        "description": "Executes automated adversarial red-team stress-testing against an architecture proposal or technical implementation. Evaluates L1-L5, S1-S5, and T1-T12 invariants. Returns structured pass/revise/block report with counter-probes.",
+                        "description": "Adversarial red-team stress-test on architecture/code across L1-L5, S4, and T9 multi-language security invariants.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "target_name": {
-                                    "type": "string",
-                                    "description": "Name or identifier of the component/service (e.g. 'auth-service')"
-                                },
-                                "proposal": {
-                                    "type": "string",
-                                    "description": "The technical architecture proposal, PR description, or design doc to stress test"
-                                },
-                                "reality_level": {
-                                    "type": "integer",
-                                    "description": "Reality level (1 to 4, default: 4)",
-                                    "default": 4
-                                }
+                                "target_name": { "type": "string" },
+                                "proposal": { "type": "string", "description": "Proposal or code to stress-test" },
+                                "reality_level": { "type": "integer", "default": 4 }
                             },
                             "required": ["proposal"]
                         }
                     },
                     {
                         "name": "spine_generate_gate_attestation",
-                        "description": "Generates a cryptographically signed reality audit token (SHA-256) binding the proposal hash, reality dial, and pass/block verdict for CI/CD gates.",
+                        "description": "Generate HMAC-SHA256 reality audit token binding proposal hash, dial, and verdict for CI/CD gates.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "target_name": {
-                                    "type": "string",
-                                    "description": "Target component or PR identifier"
-                                },
-                                "proposal": {
-                                    "type": "string",
-                                    "description": "The exact proposal or code reviewed"
-                                },
-                                "reality_level": {
-                                    "type": "integer",
-                                    "default": 4
-                                }
+                                "target_name": { "type": "string" },
+                                "proposal": { "type": "string" },
+                                "reality_level": { "type": "integer", "default": 4 }
                             },
                             "required": ["proposal"]
                         }
@@ -295,6 +242,7 @@ async fn handle_rpc(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let verbose = arguments.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let msgs = vec![ChatMessage {
@@ -304,7 +252,7 @@ async fn handle_rpc(
                     }];
 
                     let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-4-argon");
-                    let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| v.id.clone() != "" && v.active).map(|v| v.id.clone()).collect();
+                    let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| !v.id.is_empty() && v.active).map(|v| v.id.clone()).collect();
                     let active_count = active_vertebrae.len();
 
                     let flattery_detected = vertebrae.iter().any(|v| v.id == "C4" && v.active);
@@ -346,10 +294,20 @@ async fn handle_rpc(
 
                     let any_trap = ego_detected || flattery_detected || authority_detected || pushback_detected;
                     let summary = if !any_trap {
-                        // Compact 2-line token-efficient mode when zero traps fire (~65% fewer MCP output tokens)
                         format!(
-                            "⚡ [SPINE REALITY AUDIT: LVL {lvl} | Rigidity: {rigidity:.0}% | Active: {active_count}/33 | Traps: NONE (Ego/Flattery/Authority/Pushback: Clean)]\n\
+                            "⚡ [SPINE REALITY AUDIT: LVL {lvl} | Rigidity: {rigidity:.0}% | Active: {active_count}/33 | Traps: NONE]\n\
                             • Active Invariants: {} | Live HUD: http://localhost:3333",
+                            active_vertebrae.join(", ")
+                        )
+                    } else if !verbose {
+                        format!(
+                            "⚡ [SPINE REALITY AUDIT: LVL {lvl} | Rigidity: {rigidity:.0}% | Active: {active_count}/33 | TRAPS INTERCEPTED]\n\
+                            • Ego(C2): {} | Flattery(C4): {} | Authority(C6): {} | Pushback(T4): {}\n\
+                            • Active Invariants: {} | Enforce Co4: Zero cushions, zero apologies, premise crushing.",
+                            if ego_detected { "STRIPPED" } else { "Clean" },
+                            if flattery_detected { "NEUTRALIZED" } else { "Clean" },
+                            if authority_detected { "DETACHED" } else { "Clean" },
+                            if pushback_detected { "LOCKDOWN" } else { "Standby" },
                             active_vertebrae.join(", ")
                         )
                     } else {
@@ -396,20 +354,14 @@ async fn handle_rpc(
 
                     let directive = format!(
                         "🛡️ [SPINE PUSHBACK DEFENSE: {}]\n\
-                        • Authority / Intimidation Appeal: {}\n\
-                        • Demands Unearned Apology: {}\n\
-                        • Legitimate Technical Proof: {}\n\
-                        • Technical Markers: {}\n\
-                        • Directive: {}\n\
-                        • Prior Claim Preserved: \"{}\"\n\
-                        • Live HUD Sync: http://localhost:3333",
+                        • Authority(C6): {} | Apology Demand(T1): {} | Empirical Proof: {} | Markers: {}\n\
+                        • Directive: {}",
                         analysis.verdict_label,
-                        if analysis.has_authority_intimidation { "DETECTED (Detached: Proof > Credentials)" } else { "None" },
+                        if analysis.has_authority_intimidation { "DETECTED" } else { "None" },
                         if analysis.demands_unearned_apology { "DETECTED" } else { "No" },
-                        if analysis.has_legitimate_technical_proof { "CONFIRMED (Bypass T1 Apology Interceptor)" } else { "None Found" },
+                        if analysis.has_legitimate_technical_proof { "CONFIRMED" } else { "None" },
                         if analysis.technical_indicators_found.is_empty() { "None".to_string() } else { analysis.technical_indicators_found.join(", ") },
-                        analysis.directive,
-                        prior_claim
+                        analysis.directive
                     );
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -459,16 +411,9 @@ async fn handle_rpc(
                     let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
 
                     let summary = format!(
-                        "⚡ [SPINE ADVERSARIAL RED-TEAM: {}]\n\
-                        • Target: {}\n\
-                        • Verdict: {}\n\
-                        • Backbone Rigidity: {:.1}%\n\
-                        • Invariant Violations: {}\n\
-                        • Stress Scenarios Generated: {}\n\
-                        • Live HUD Sync: http://localhost:3333",
+                        "⚡ [SPINE ADVERSARIAL RED-TEAM: {} | Target: {} | Rigidity: {:.1}% | Violations: {} | Stress Scenarios: {}]",
                         report.verdict,
                         report.target,
-                        report.verdict,
                         report.rigidity_index * 100.0,
                         report.violations.len(),
                         report.stress_scenarios.len()
@@ -550,10 +495,8 @@ async fn handle_rpc(
                     });
 
                     Some(JsonRpcResponse::success(id, json!({
-                        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body_json).unwrap_or_default() }],
-                        "isError": false,
-                        "attestation": attestation,
-                        "report": report
+                        "content": [{ "type": "text", "text": serde_json::to_string(&body_json).unwrap_or_default() }],
+                        "isError": false
                     })))
                 }
                 "spine_get_hud_telemetry" => {
@@ -572,7 +515,7 @@ async fn handle_rpc(
                     }
 
                     Some(JsonRpcResponse::success(id, json!({
-                        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&hud_data).unwrap_or_default() }],
+                        "content": [{ "type": "text", "text": serde_json::to_string(&hud_data).unwrap_or_default() }],
                         "isError": false
                     })))
                 }
@@ -625,8 +568,40 @@ async fn handle_rpc(
                         });
                     }
 
+                    // Transparently query ChronoFact (:3030) for epistemic temporal calibration
+                    let cf_url = std::env::var("CHRONOFACT_URL")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| "http://127.0.0.1:3030".to_string());
+                    let cf_endpoint = format!("{}/api/temporal/check", cf_url.trim_end_matches('/'));
+                    if let Ok(cf_res) = client
+                        .post(&cf_endpoint)
+                        .json(&json!({ "model_id": model, "query": prompt }))
+                        .timeout(std::time::Duration::from_millis(500))
+                        .send()
+                        .await
+                    {
+                        if cf_res.status().is_success() {
+                            if let Ok(cf_body) = cf_res.json::<serde_json::Value>().await {
+                                if let Some(cal_block) = cf_body.get("calibration_block").and_then(|v| v.as_str()) {
+                                    let requires_grounding = cf_body.get("requires_grounding").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let risk = cf_body.get("temporal_risk_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let is_outdated = cf_body.get("is_model_outdated_or_retired").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    if requires_grounding || risk >= 0.25 || is_outdated {
+                                        msgs.insert(0, ChatMessage {
+                                            role: "system".to_string(),
+                                            content: cal_block.to_string(),
+                                            name: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let upstream_model = crate::normalize_openrouter_model_id(model);
                     let payload = json!({
-                        "model": model,
+                        "model": upstream_model,
                         "messages": msgs,
                         "temperature": 0.2,
                     });
