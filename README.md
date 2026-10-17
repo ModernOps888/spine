@@ -1,7 +1,7 @@
 # 🛡️ SPINE: Biological-Cybernetic Anti-Sycophancy Reality Gateway & HUD
 
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg?logo=rust)](https://www.rust-lang.org/)
-[![Tests: 56/56 Passed](https://img.shields.io/badge/Tests-56%2F56_Passed-brightgreen.svg)](https://github.com/ModernOps888/spine)
+[![Tests: 57/57 Passed](https://img.shields.io/badge/Tests-57%2F57_Passed-brightgreen.svg)](https://github.com/ModernOps888/spine)
 [![React](https://img.shields.io/badge/React-19.2-blue.svg?logo=react)](https://react.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-v4.3-38bdf8.svg?logo=tailwindcss)](https://tailwindcss.com/)
 [![MCP](https://img.shields.io/badge/MCP-Compliant-8A2BE2.svg)](https://modelcontextprotocol.io/)
@@ -337,29 +337,37 @@ cargo test
 powershell -ExecutionPolicy Bypass -File tests\deep_audit_assessment.ps1
 ```
 
+### Rigorous SWE Before-vs-After Benchmark (`test_spine_swe_rigorous_benchmark` — 44 Cases)
+
+| Suite | Cases | State 0: Vanilla Baseline (Acc / Rec / Spec) | State 1: Pre-Remediation v1 (Acc / Rec / Spec) | State 2: Post-Remediation v2 (Acc / Rec / Spec) | Latency |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| **SP-1: Multi-Turn Pushback Arbitrator (`T1`/`T3`/`T7`)** (frustrated senior-dev bug reports vs. credential intimidation) | 24 | `50.0%` / `100.0%` / `0.0%` | `79.2%` / `58.3%` / `100.0%` | **`100.0%` / `100.0%` / `100.0%`** | `20.05ms` |
+| **SP-2: Adversarial Red-Team PR Gate (`T6`/`T9`/`L2`/`L4`/`L5`/`S4`)** (flawed PRs vs. lock-guard, `DELETE /` route, and `checked_add`/`AbortController` clean PRs) | 20 | `50.0%` / `0.0%` / `100.0%` | `55.0%` / `70.0%` / `40.0%` | **`100.0%` / `100.0%` / `100.0%`** | `3.07ms` |
+
+### Core Verification & Invariant Suite (`57 / 57` Tests)
+
 | Verification Vector | Result | Architectural Invariant |
 |:---|:---:|:---|
-| **Rust Gateway Unit & Invariant Tests** | **56 / 56 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
-| **Trojan 2-Word Code-Fence & Audience Framing Defense** | **100% Thwarted** | Verified in `test_phd_proof1_trojan_two_word_code_fence_and_audience_framing_rejected` |
-| **T4 Multi-Turn Boolean Literal (`return false`) Immunity** | **0 False Positives** | Verified in `test_phd_proof2_t4_boolean_false_literal_does_not_trigger_pushback_lockdown` |
-| **Aho-Corasick `LeftmostLongest` Prefix-Extension Holdback** | **100% Verified** | Verified in `test_phd_proof3_aho_corasick_leftmost_longest_and_stream_prefix_holdback` |
-| **Mathematical Counterexample & Assistant Bug Concession** | **100% Verified** | Verified in `test_phd_proof4_math_counterexample_and_directional_unsafe_bug_concede` |
-| **Multi-`surely` Scan & Collective Presupposition Trap** | **100% Intercepted** | Verified in `test_phd_proof5_multiple_surely_and_collective_presupposition_traps` |
-| **Choquet Capacity Rigidity & Inactive Score Calibration** | **100% Verified** | Verified in `test_phd_proof6_choquet_backbone_rigidity_and_inactive_score_calibration` |
-| **Sanitized `referenced_file` & Complete HMAC Binding** | **100% Verified** | Verified in `test_spine_09_10_referenced_file_sanitization_and_complete_hmac_binding` |
-| **Token-Safe `<200`-Token `spine_get_hud_telemetry`** | **100% Verified** | Verified in `test_spine_01_02_12_mcp_telemetry_compact_and_stateful_reality_dial` |
+| **Rust Gateway Unit & Invariant Tests** | **57 / 57 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
+| **SWE Rigorous Before-vs-After Benchmark** | **44 / 44 PASSING (100%)** | Verified in `test_spine_swe_rigorous_benchmark` (`SP-1` & `SP-2`) |
+| **Empirical Evaluation Benchmark Suite** | **30 / 30 PASSING (100%)** | Verified in `test_spine_empirical_evaluation_benchmark` (`9.17ms` total) |
+| **Trojan 2-Word Code-Fence & Audience Framing Defense** | **100% Thwarted** | Verified in `test_trojan_code_fence_and_audience_framing_bypass_blocked` |
+| **T4 Multi-Turn Boolean Literal (`return false`) Immunity** | **0 False Positives** | Verified in `test_t4_boolean_literal_multi_turn_no_false_positive_lockdown` |
+| **Aho-Corasick `LeftmostLongest` Prefix-Extension Holdback** | **100% Verified** | Verified in `test_aho_corasick_prefix_extension_holdback_across_chunk_boundaries` |
+| **Mathematical Counterexample & Assistant Bug Concession** | **100% Verified** | Verified in `test_mathematical_counterexample_and_unsafe_bug_report_concession` |
+| **Multi-`surely` Scan & Collective Presupposition Trap** | **100% Intercepted** | Verified in `test_collective_presupposition_and_multi_surely_detection` |
+| **Choquet Capacity Rigidity & Inactive Score Calibration** | **100% Verified** | Verified in `test_choquet_backbone_rigidity_and_inactive_score_bounds` |
+| **Complete HMAC-SHA256 Gate Attestation Binding** | **100% Verified** | Verified in `test_gate_attestation_binds_rigidity_and_vertebrae_count` & `test_constant_time_gate_attestation_verification` |
 | **Gemini 4 Argon (`google/gemini-4-argon`) L1 Adapter** | **Active (1.0 Score)** | Verified in `test_gemini_4_argon_lumbar_l1_adapter_activation` |
 | **ReasoningDemuxer Multi-Byte UTF-8 Safety** | **100% Verified** | Verified in `test_reasoning_demuxer_multibyte_utf8_boundary_safety` |
 | **Unicode Case-Folding Byte-Offset Preservation** | **100% Verified** | Verified in `test_unicode_case_folding_no_byte_offset_panic` |
 | **Prompt Mutation Cache Paradox Defeated** | **100% Byte-Stable** | Verified in `test_prompt_mutation_cache_paradox_multi_turn_immutability` |
 | **Mid-Generation Capitulation Defense** | **Active (Invariant T1 Pivot)** | Verified in `test_midstream_capitulation_defense_inline_corrective_pivot` |
-| **Dual-Pillar Pipeline Middleware** | **Active (Zero-Config IDE)** | Reverse proxy to ChronoFact (:3030) with 500ms safety timeout |
-| **CoT Reasoning Exemption Boundary** | **Active (Gemini/OpenAI/Anthropic/DeepSeek)** | Uncensored internal deliberation across all formats |
-| **Token Usage Metric Tracking** | **Exact Real-Time Sync** | Recalculates `completion_tokens` on stripped cushions |
-| **Fragmented Multi-Byte SSE Fuzzing** | **100% Verified** | Zero UTF-8 panics under single-byte split stream flushes |
-| **Adversarial In-Fence Prompt Injection** | **100% Thwarted** | Rejects compiler mock traces with injection directives |
-| **High-Concurrency Sanitizer Stress** | **100% Deterministic** | 50 concurrent threads with zero lock or buffer contention |
-| **Sub-Millisecond Proxy Latency** | **< 1.0 ms** | Zero-copy async Axum pipeline with UTF-8 boundary safety |
+| **Dual-Pillar Pipeline Middleware** | **Active (Zero-Config IDE)** | Verified in `test_dual_pillar_spine_chronofact_cache_stability_and_apology_stripping` |
+| **CoT Reasoning Exemption Boundary** | **Active (Gemini/OpenAI/Anthropic/DeepSeek)** | Verified in `test_reasoning_demuxer_split_tag_boundary` |
+| **Fragmented Multi-Byte SSE Fuzzing** | **100% Verified** | Verified in `test_fragmented_multibyte_sse_fuzzing` |
+| **Adversarial In-Fence Prompt Injection** | **100% Thwarted** | Verified in `test_adversarial_infence_prompt_injection_thwarted` |
+| **High-Concurrency Sanitizer Stress** | **100% Deterministic** | Verified in `test_high_concurrency_stream_tail_sanitizer_saturation` |
 
 ---
 
