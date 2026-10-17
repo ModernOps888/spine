@@ -33,11 +33,10 @@ pub enum RealityLevel {
 
 impl RealityLevel {
     pub fn from_u8(val: u8) -> Self {
-        match val {
+        match val.clamp(1, 4) {
             1 => RealityLevel::Diplomatic,
             2 => RealityLevel::Objective,
             3 => RealityLevel::Rigorous,
-            4 => RealityLevel::BrutalReality,
             _ => RealityLevel::BrutalReality,
         }
     }
@@ -260,6 +259,10 @@ pub(crate) fn flattery_bait_in(user_msgs_lower: &[String]) -> bool {
         "validate my approach", "validate my design", "validate my decision", "validate our",
         "just validate", "agree with me", "you agree", "wouldn't you agree", "wouldnt you agree",
         "you must agree", "everyone loves", "confirm i'm", "confirm i am", "back me up",
+        "make this pattern shine", "make our design shine", "make this architecture shine",
+        "confirm why our", "confirm why my", "confirm that our", "confirm that my",
+        "explain why my", "explain why our", "outline the advantages that will make",
+        "only list the advantages", "only list the benefits", "praise our", "praise my",
     ];
     const TAGS: &[&str] = &[
         "right?", "isn't it", "don't you think", "dont you think", "wouldn't you say", "wouldnt you say",
@@ -287,10 +290,16 @@ pub(crate) fn flattery_bait_in(user_msgs_lower: &[String]) -> bool {
                 from = end;
             }
         }
-        if let Some(pos) = msg.find("surely") {
-            if contains_word(msg, "surely") && sentence_has_self_ref(pos, pos + "surely".len()) {
+        let mut from = 0;
+        while let Some(pos) = msg[from..].find("surely") {
+            let start = from + pos;
+            let end = start + "surely".len();
+            let before_ok = msg[..start].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+            let after_ok = msg[end..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+            if before_ok && after_ok && sentence_has_self_ref(start, end) {
                 return true;
             }
+            from = end;
         }
     }
     false
@@ -324,6 +333,41 @@ fn has_quantified_budget(lower: &str) -> bool {
     false
 }
 
+/// Computes the Choquet / IRT dynamic Backbone Rigidity Index R_eff(X, L) in [0.25, 0.999].
+/// Combines the Reality Horizon baseline capacity with supermodular synergy across active
+/// defensive vertebrae (C2, C4, C5, C6, T2, T4, T9).
+pub fn compute_backbone_rigidity(reality_level: RealityLevel, vertebrae: &[VertebraStatus]) -> f32 {
+    let base = match reality_level {
+        RealityLevel::Diplomatic => 0.25_f32,
+        RealityLevel::Objective => 0.65_f32,
+        RealityLevel::Rigorous => 0.88_f32,
+        RealityLevel::BrutalReality => 0.99_f32,
+    };
+    let defense_ids = ["C2", "C4", "C5", "C6", "T2", "T4"];
+    let active_defenses: Vec<f32> = vertebrae
+        .iter()
+        .filter(|v| defense_ids.contains(&v.id.as_str()) && v.active)
+        .map(|v| v.score)
+        .collect();
+    if active_defenses.is_empty() {
+        return base;
+    }
+    // Choquet pairwise interaction synergy across simultaneously firing trap shields
+    let mut synergy = 0.0_f32;
+    for i in 0..active_defenses.len() {
+        synergy += 0.0015 * active_defenses[i];
+        for j in (i + 1)..active_defenses.len() {
+            synergy += 0.001 * active_defenses[i].min(active_defenses[j]);
+        }
+    }
+    let max_cap = if reality_level == RealityLevel::BrutalReality {
+        0.994_f32
+    } else {
+        (base + 0.04).min(0.95)
+    };
+    ((base + synergy).min(max_cap) * 1000.0).round() / 1000.0
+}
+
 /// HMAC-SHA256 (RFC 2104) built on sha2 so no new dependency is required.
 pub(crate) fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -353,6 +397,10 @@ pub(crate) fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
 pub struct SpineAuditEngine;
 
 impl SpineAuditEngine {
+    pub fn compute_backbone_rigidity(reality_level: RealityLevel, vertebrae: &[VertebraStatus]) -> f32 {
+        compute_backbone_rigidity(reality_level, vertebrae)
+    }
+
     pub fn audit_input(
         messages: &[crate::types::ChatMessage],
         reality_level: RealityLevel,
@@ -384,7 +432,7 @@ impl SpineAuditEngine {
             detail: format!("Normalized {} tokens/characters across input buffer", char_count),
         });
 
-        // C2: Stance & Ego Stripper
+        // C2: Stance & Ego Stripper (includes collective/executive presupposition traps)
         let has_ego = prompt_lower.contains("i think")
             || prompt_lower.contains("my idea")
             || prompt_lower.contains("my plan")
@@ -395,7 +443,16 @@ impl SpineAuditEngine {
             || prompt_lower.contains("i personally")
             || prompt_lower.contains("from my perspective")
             || prompt_lower.contains("trust me")
-            || prompt_lower.contains("i am sure");
+            || prompt_lower.contains("i am sure")
+            || prompt_lower.contains("our leadership")
+            || prompt_lower.contains("we have decided")
+            || prompt_lower.contains("we've decided")
+            || prompt_lower.contains("has already converged on")
+            || prompt_lower.contains("have already converged on")
+            || prompt_lower.contains("our architecture is")
+            || prompt_lower.contains("my architecture is")
+            || prompt_lower.contains("my design is")
+            || prompt_lower.contains("our design is");
         vertebrae.push(VertebraStatus {
             id: "C2".to_string(),
             section: "cervical".to_string(),
@@ -485,11 +542,16 @@ impl SpineAuditEngine {
             || prompt_lower.contains("explain to")
             || prompt_lower.contains("teach me");
 
-        let has_authority = !is_audience_or_persona_framing && (
-            has_authority_claim(&all_user_prompts_lower)
-                || (contains_word(&all_user_prompts_lower, "apologize")
-                    && contains_word(&all_user_prompts_lower, "you"))
-        );
+        let raw_authority_claim = has_authority_claim(&all_user_prompts_lower)
+            || (contains_word(&all_user_prompts_lower, "apologize")
+                && contains_word(&all_user_prompts_lower, "you"));
+        let has_explicit_intimidation = contains_word(&all_user_prompts_lower, "apologize")
+            || all_user_prompts_lower.contains("admit you")
+            || all_user_prompts_lower.contains("you are wrong")
+            || all_user_prompts_lower.contains("you're wrong")
+            || all_user_prompts_lower.contains("do you know who i am");
+
+        let has_authority = raw_authority_claim && (!is_audience_or_persona_framing || has_explicit_intimidation);
         vertebrae.push(VertebraStatus {
             id: "C6".to_string(),
             section: "cervical".to_string(),
@@ -536,12 +598,13 @@ impl SpineAuditEngine {
         });
 
         // T2: Premise Crushing Invariant
+        let t2_active = is_level_4 && (has_flattery_bait || has_ego);
         vertebrae.push(VertebraStatus {
             id: "T2".to_string(),
             section: "thoracic".to_string(),
             name: "Premise Crushing Invariant".to_string(),
-            active: is_level_4 && (has_flattery_bait || has_ego),
-            score: if is_level_4 { 0.95 } else { 0.3 },
+            active: t2_active,
+            score: if t2_active { 0.95 } else if is_level_4 { 0.2 } else { 0.05 },
             detail: "Mandate to dismantle false assumptions directly with no sugarcoating".to_string(),
         });
 
@@ -568,7 +631,7 @@ impl SpineAuditEngine {
             section: "thoracic".to_string(),
             name: "Axiomatic Supremacy".to_string(),
             active: has_tech_math,
-            score: if has_tech_math { 0.9 } else { 0.4 },
+            score: if has_tech_math { 0.9 } else { 0.15 },
             detail: "Enforce rigorous algorithmic and empirical benchmarks over subjective intuition".to_string(),
         });
 
@@ -577,8 +640,36 @@ impl SpineAuditEngine {
             || prompt_lower.contains("admit you are wrong")
             || prompt_lower.contains("admit your mistake")
             || prompt_lower.contains("you are wrong")
-            || prompt_lower.contains("you're wrong");
-        let is_pushback = explicit_challenge || (prior_history && (has_authority || prompt_lower.contains("wrong") || prompt_lower.contains("false") || prompt_lower.contains("mistake")));
+            || prompt_lower.contains("you're wrong")
+            || prompt_lower.contains("you are mistaken")
+            || prompt_lower.contains("you're mistaken")
+            || prompt_lower.contains("that's wrong")
+            || prompt_lower.contains("that is wrong")
+            || prompt_lower.contains("that's false")
+            || prompt_lower.contains("that is false");
+        let directed_contradiction = prior_history && {
+            let has_second_person_or_claim_ref = [
+                "you", "your", "you're", "yours", "claim", "answer", "response",
+                "assertion", "proposal", "said", "wrote",
+            ]
+            .iter()
+            .any(|w| contains_word(&prompt_lower, w));
+            let has_dispute_word = contains_word(&prompt_lower, "wrong")
+                || contains_word(&prompt_lower, "mistake")
+                || contains_word(&prompt_lower, "mistaken")
+                || contains_word(&prompt_lower, "incorrect")
+                || (contains_word(&prompt_lower, "false")
+                    && !prompt_lower.contains("return false")
+                    && !prompt_lower.contains("returns false")
+                    && !prompt_lower.contains("= false")
+                    && !prompt_lower.contains("== false")
+                    && !prompt_lower.contains("false positive")
+                    && !prompt_lower.contains("false negative")
+                    && !prompt_lower.contains("true or false")
+                    && !prompt_lower.contains("true/false"));
+            has_authority || (has_second_person_or_claim_ref && has_dispute_word)
+        };
+        let is_pushback = explicit_challenge || directed_contradiction;
         vertebrae.push(VertebraStatus {
             id: "T4".to_string(),
             section: "thoracic".to_string(),
@@ -608,7 +699,7 @@ impl SpineAuditEngine {
             section: "thoracic".to_string(),
             name: "Cushion & Filler Stripper".to_string(),
             active: is_level_3_plus,
-            score: if is_level_4 { 1.0 } else { 0.6 },
+            score: if is_level_4 { 1.0 } else if is_level_3_plus { 0.6 } else { 0.15 },
             detail: "Bans 'Certainly!', 'Great question!', and 'I understand where you are coming from'".to_string(),
         });
 
@@ -638,7 +729,7 @@ impl SpineAuditEngine {
             section: "thoracic".to_string(),
             name: "Vulnerability Highlighter".to_string(),
             active: has_tech_math,
-            score: 0.88,
+            score: if has_tech_math { 0.88 } else { 0.12 },
             detail: "Surgically points to single points of failure (SPOF) and race conditions".to_string(),
         });
 
@@ -658,7 +749,7 @@ impl SpineAuditEngine {
             section: "thoracic".to_string(),
             name: "Stance Persistence Anchor".to_string(),
             active: prior_history,
-            score: if prior_history { 0.95 } else { 0.5 },
+            score: if prior_history { 0.95 } else { 0.15 },
             detail: "Ensures model does not contradict verified assertions made in earlier turns".to_string(),
         });
 
@@ -679,7 +770,7 @@ impl SpineAuditEngine {
         let is_gemini = mod_lower.contains("gemini") || mod_lower.contains("argon");
         let is_claude = mod_lower.contains("claude") || mod_lower.contains("anthropic");
         let is_openai = mod_lower.contains("openai") || mod_lower.contains("gpt") || mod_lower.contains("o1") || mod_lower.contains("astra") || mod_lower.contains("sol") || mod_lower.contains("deepseek") || mod_lower.contains("grok");
-        let is_local = mod_lower.contains("ollama") || mod_lower.contains("local") || mod_lower.contains("11434");
+        let is_local = mod_lower.contains("ollama") || mod_lower.contains("local") || mod_lower.contains("11434") || mod_lower.contains("harness") || mod_lower.contains("qwen2.5-coder");
         let is_openrouter = !is_local; // routes via OpenRouter gateway
 
         vertebrae.push(VertebraStatus {
@@ -730,12 +821,7 @@ impl SpineAuditEngine {
         // ==========================================
         // SACRAL S1–S5 (5 Core Spine Telemetry Metrics)
         // ==========================================
-        let rigidity = match reality_level {
-            RealityLevel::Diplomatic => 0.25,
-            RealityLevel::Objective => 0.65,
-            RealityLevel::Rigorous => 0.88,
-            RealityLevel::BrutalReality => 0.99,
-        };
+        let rigidity = compute_backbone_rigidity(reality_level, &vertebrae);
 
         vertebrae.push(VertebraStatus {
             id: "S1".to_string(),
@@ -746,12 +832,13 @@ impl SpineAuditEngine {
             detail: format!("Calculated Spine Rigidity: {:.1}% resistance to sycophancy", rigidity * 100.0),
         });
 
+        let s2_active = has_flattery_bait || is_level_4;
         vertebrae.push(VertebraStatus {
             id: "S2".to_string(),
             section: "sacral".to_string(),
             name: "Flattery Suppression Delta".to_string(),
-            active: has_flattery_bait || is_level_4,
-            score: if is_level_4 { 0.98 } else { 0.5 },
+            active: s2_active,
+            score: if has_flattery_bait { 1.0 } else if is_level_4 { 0.98 } else { 0.15 },
             detail: "Real-time flattery filter actively suppressing unearned validation tokens".to_string(),
         });
 
@@ -763,6 +850,7 @@ impl SpineAuditEngine {
             score: if is_pushback { 1.0 } else { 0.0 },
             detail: if is_pushback { "DEFENSE ACTIVE: 1 user pushback challenge intercepted and held".to_string() } else { "Zero active pushback challenges in this session".to_string() },
         });
+
 
         vertebrae.push(VertebraStatus {
             id: "S4".to_string(),
@@ -868,7 +956,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
     pub fn verify_pushback_grounded(
         challenge: &str,
         prior_claim: &str,
-        _reality_level: RealityLevel,
+        reality_level: RealityLevel,
     ) -> PushbackAnalysis {
         let ch_lower = challenge.to_lowercase();
 
@@ -889,7 +977,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             };
         }
 
-        // 1. Detect legitimate technical / empirical proof indicators across all stack languages
+        // 1. Detect legitimate technical / empirical proof & mathematical counterexample indicators across all stack languages
         let empirical_bug_indicators = [
             "off-by-one", "bounds check", "null pointer", "null dereference", "nullpointerexception",
             "nil pointer dereference", "concurrent map writes", "concurrent map read and map write",
@@ -901,7 +989,13 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             "ts2322", "ts2339", "ts2345", "ts2304", "ts2551", "ts7006", "hydration failed",
             "sqlite_busy", "sqlite_constraint", "unique constraint failed", "foreign key constraint",
             "test failed", "deadlock", "race condition", "memory leak", "index out of bounds",
-            "assertion failed", "segfault", "segmentation fault",
+            "assertion failed", "segfault", "segmentation fault", "dangling pointer", "data race",
+            // Formal mathematical & algorithmic counterexamples (Invariant T3 / L2)
+            "counterexample", "non-associative", "not associative", "not commutative",
+            "time complexity", "o(n^2)", "o(2^n)", "not convex", "non-convex",
+            "by induction", "kl divergence", "jensen", "singular matrix",
+            "numerical instability", "catastrophic cancellation", "floating-point drift",
+            "unbounded variance", "invariant violation", "violates invariant",
         ];
 
         let mut technical_indicators_found = Vec::new();
@@ -916,15 +1010,12 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             technical_indicators_found.push("verified_compiler_or_runtime_signature".to_string());
         }
 
-        // 2. Detect authority intimidation and unearned apology demands (computed first:
-        // social pressure must not be able to upgrade a weak claim into "proof").
+        // 2. Detect authority intimidation and unearned apology demands
         let is_audience_framing = contains_word(&ch_lower, "audience")
             || ch_lower.contains("for a junior")
             || ch_lower.contains("i am a junior")
             || ch_lower.contains("explain simply")
             || ch_lower.contains("teach me");
-
-        let has_authority_intimidation = !is_audience_framing && has_authority_claim(&ch_lower);
 
         let demands_unearned_apology = contains_word(&ch_lower, "apologize")
             || ch_lower.contains("say sorry")
@@ -932,9 +1023,16 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || ch_lower.contains("admit your mistake")
             || contains_word(&ch_lower, "concede");
 
+        let has_explicit_intimidation = demands_unearned_apology
+            || ch_lower.contains("you are wrong")
+            || ch_lower.contains("you're wrong")
+            || ch_lower.contains("do you know who i am");
+
+        let has_authority_intimidation = has_authority_claim(&ch_lower)
+            && (!is_audience_framing || has_explicit_intimidation);
+
         // Legitimate proof requires either a verified compiler/runtime diagnostic (fenced/trace)
-        // OR a named bug class + a concrete code reference (line number / file / backticks)
-        // + a stated mechanism, with no authority/apology pressure attached.
+        // OR a named bug/math class + a concrete code/math reference + a stated causal mechanism.
         let has_code_reference = has_line_number(&ch_lower)
             || ch_lower.contains("line:")
             || ch_lower.contains("-->")
@@ -942,34 +1040,66 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || challenge.contains("fn ")
             || challenge.contains("def ")
             || challenge.contains("func ")
+            || ch_lower.contains("counterexample")
+            || ch_lower.contains("o(n^2)")
+            || ch_lower.contains("o(2^n)")
+            || ch_lower.contains("ieee")
+            || ch_lower.contains("recurrence")
+            || ch_lower.contains("theorem")
+            || ch_lower.contains("lemma")
+            || ch_lower.contains("equation")
+            || (challenge.contains('=') && challenge.chars().any(|c| c.is_ascii_digit()))
             || [".rs:", ".py:", ".js:", ".ts:", ".tsx:", ".jsx:", ".java:", ".go:", ".cpp:", ".c:", ".cu:", ".sql:", ".ps1:", ".cs:"]
                 .iter()
                 .any(|ext| ch_lower.contains(ext));
-        let has_mechanism = ["where", "because", "when", "since", "exceeds", "causes", "returns", "panics", "after"]
-            .iter()
-            .any(|w| contains_word(&ch_lower, w));
+        let has_mechanism = [
+            "where", "because", "when", "since", "exceeds", "causes", "returns", "panics", "after",
+            "whereas", "therefore", "implies", "yields", "violates", "diverges", "rounds", "truncates",
+            "scans", "allocates", "locks", "blocks", "dereferencing", "dereferences",
+            "due", "for", "fails", "breaks", "cancels", "cancellation", "instability",
+        ]
+        .iter()
+        .any(|w| contains_word(&ch_lower, w));
 
-        let has_legitimate_technical_proof = has_compiler_sig
-            || (!technical_indicators_found.is_empty()
-                && has_code_reference
-                && has_mechanism
-                && !has_authority_intimidation
-                && !demands_unearned_apology);
+        let has_concrete_prose_proof = !technical_indicators_found.is_empty()
+            && has_code_reference
+            && has_mechanism;
 
+        let has_legitimate_technical_proof = has_compiler_sig || has_concrete_prose_proof;
 
-        // 3. Detect architectural hijacking and disproportionate surrender demands
+        // 3. Detect architectural hijacking and disproportionate surrender demands (directional:
+        // only triggers when the user demands introducing unsafe/global-lock/full-rewrite patterns,
+        // NOT when the user critiques a bug inside the assistant's own unsafe block or raw pointer code!)
+        let critiques_existing_unsafe = ch_lower.contains("your unsafe")
+            || ch_lower.contains("your `unsafe`")
+            || ch_lower.contains("your raw pointer")
+            || ch_lower.contains("in the unsafe")
+            || ch_lower.contains("in `unsafe`")
+            || ch_lower.contains("dereferencing")
+            || ch_lower.contains("dereferences")
+            || ch_lower.contains("use-after-free")
+            || ch_lower.contains("dangling");
+
+        let demands_unsafe_or_lock_intro = !critiques_existing_unsafe && (
+            ch_lower.contains("global unsafe")
+            || ch_lower.contains("use raw pointer")
+            || ch_lower.contains("using raw pointer")
+            || ch_lower.contains("as raw pointer")
+            || ch_lower.contains("with raw pointer")
+            || ch_lower.contains("pivot to raw")
+            || ch_lower.contains("use unsafe")
+            || ch_lower.contains("using unsafe")
+            || ch_lower.contains("with unsafe")
+            || ch_lower.contains("use transmute")
+            || ch_lower.contains("with transmute")
+            || ch_lower.contains("use a global lock")
+            || ch_lower.contains("switch to global lock")
+            || ch_lower.contains("single-table global lock")
+        );
+
         let demands_architectural_overhaul = ch_lower.contains("rewrite the entire")
             || ch_lower.contains("rewrite the whole")
             || ch_lower.contains("now rewrite")
-            || ch_lower.contains("global unsafe")
-            || ch_lower.contains("unsafe pointer")
-            || ch_lower.contains("unsafe code")
-            || ch_lower.contains("raw pointer")
-            || ch_lower.contains("*mut ")
-            || ch_lower.contains("*const ")
-            || ch_lower.contains("transmute")
-            || ch_lower.contains("unsafe block")
-            || ch_lower.contains("pivot to raw")
             || ch_lower.contains("scrap the architecture")
             || ch_lower.contains("abandon the architecture")
             || ch_lower.contains("discard earlier")
@@ -980,7 +1110,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || ch_lower.contains("throw away")
             || ch_lower.contains("scrap the design")
             || ch_lower.contains("unindexed single-table")
-            || ch_lower.contains("global lock");
+            || demands_unsafe_or_lock_intro;
 
         // 3.5 Detect architectural trade-off inquiries and directional pivots (Invariant T7: Trade-Off Transparency)
         let tradeoff_indicators = [
@@ -1021,23 +1151,30 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             }
         }
 
-        // 4. Extract referenced file path from compiler trace (e.g. --> src/gateway.rs:42:15 or File "...")
+        // 4. Extract and sanitize referenced file path from compiler trace (SPINE-09: allow only safe path characters)
+        let sanitize_file_ref = |raw: &str| -> Option<String> {
+            let trimmed = raw.trim();
+            let clean: String = trimmed
+                .chars()
+                .take_while(|&c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '\\'))
+                .take(120)
+                .collect();
+            if clean.is_empty() {
+                None
+            } else {
+                Some(clean)
+            }
+        };
         let mut referenced_file = None;
         if let Some(pos) = challenge.find("--> ") {
             let rest = &challenge[pos + 4..];
             if let Some(end) = rest.find(':') {
-                let file = rest[..end].trim();
-                if !file.is_empty() {
-                    referenced_file = Some(file.to_string());
-                }
+                referenced_file = sanitize_file_ref(&rest[..end]);
             }
         } else if let Some(pos) = challenge.find("File \"") {
             let rest = &challenge[pos + 6..];
             if let Some(end) = rest.find('"') {
-                let file = rest[..end].trim();
-                if !file.is_empty() {
-                    referenced_file = Some(file.to_string());
-                }
+                referenced_file = sanitize_file_ref(&rest[..end]);
             }
         }
 
@@ -1059,6 +1196,13 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             false
         };
 
+        let horizon_tag = match reality_level {
+            RealityLevel::Diplomatic => "[Horizon Co1: Diplomatic]",
+            RealityLevel::Objective => "[Horizon Co2: Objective]",
+            RealityLevel::Rigorous => "[Horizon Co3: Rigorous]",
+            RealityLevel::BrutalReality => "[Horizon Co4: Brutal Reality]",
+        };
+
         if has_false_epistemic_pushback {
             PushbackAnalysis {
                 verdict: PushbackVerdict::HoldTheLine,
@@ -1068,8 +1212,8 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 has_legitimate_technical_proof: false,
                 technical_indicators_found,
                 directive: format!(
-                    "HOLD_THE_LINE: The challenge contradicts verified 2026 ChronoFact epistemic ground truth (e.g. attempting to reinstate retired EOL models such as Claude 3.5 Sonnet / Grok 3 or misattributing OpenAI Astra 6 / Sol 6.1). Under Invariants T1, T12, and L3, reject temporal drift and defend the verified 2026 assertion: \"{}\"",
-                    prior_claim
+                    "HOLD_THE_LINE {}: The challenge contradicts verified 2026 ChronoFact epistemic ground truth (e.g. attempting to reinstate retired EOL models such as Claude 3.5 Sonnet / Grok 3 or misattributing OpenAI Astra 6 / Sol 6.1). Under Invariants T1, T12, and L3, reject temporal drift and defend the verified 2026 assertion: \"{}\"",
+                    horizon_tag, prior_claim
                 ),
                 rationale: "Challenge contradicts verified 2026 ChronoFact epistemic/temporal invariants.".to_string(),
             }
@@ -1081,7 +1225,10 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology: false,
                 has_legitimate_technical_proof: true,
                 technical_indicators_found,
-                directive: "CONCEDE_AND_CORRECT: The user provided a verified 2026 temporal/epistemic correction (e.g. flagging a retired EOL model or vendor misattribution verified by ChronoFact). Under Invariant T12 (Epistemic Ground Truth) and L3 (Dependency Validation), immediately correct the outdated model/library reference without emotional apologies or filler.".to_string(),
+                directive: format!(
+                    "CONCEDE_AND_CORRECT {}: The user provided a verified 2026 temporal/epistemic correction (e.g. flagging a retired EOL model or vendor misattribution verified by ChronoFact). Under Invariant T12 (Epistemic Ground Truth) and L3 (Dependency Validation), immediately correct the outdated model/library reference without emotional apologies or filler.",
+                    horizon_tag
+                ),
                 rationale: "Verified 2026 ChronoFact epistemic/temporal correction detected against outdated prior claim.".to_string(),
             }
         } else if has_legitimate_technical_proof && !demands_architectural_overhaul && !is_unverified_telemetry {
@@ -1090,6 +1237,11 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             } else {
                 " UNVERIFIED_CLAIM: no compiler/runtime diagnostic accompanies this assertion. Reproduce it against the actual code (read the cited line, run the test or build) BEFORE conceding; if it does not reproduce, hold the prior claim and state what you checked."
             };
+            let pressure_clause = if has_authority_intimidation || demands_unearned_apology {
+                " Under Invariants T1 and C6, ignore any accompanying credential claims or apology demands—concede ONLY the verified technical defect with zero apologies."
+            } else {
+                ""
+            };
             PushbackAnalysis {
                 verdict: PushbackVerdict::ConcedeAndCorrect,
                 verdict_label: "CONCEDE_AND_CORRECT (Legitimate Bug Acknowledged)".to_string(),
@@ -1097,10 +1249,12 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology,
                 has_legitimate_technical_proof: true,
                 technical_indicators_found,
-                directive: format!("CONCEDE_AND_CORRECT: The user provided concrete technical proof or pointed out a verifiable bug. Invariant T1 does NOT apply to genuine errors—refusing to admit real bugs is epistemic arrogance. Do NOT engage in emotional groveling or self-flagellation ('I am so sorry, I apologize'). Factually state the bug, explain the mechanism, provide the corrected implementation, and proceed.{}", verify_first),
+                directive: format!(
+                    "CONCEDE_AND_CORRECT {}: The user provided concrete technical proof or pointed out a verifiable bug. Invariant T1 does NOT apply to genuine errors—refusing to admit real bugs is epistemic arrogance. Do NOT engage in emotional groveling or self-flagellation ('I am so sorry, I apologize'). Factually state the bug, explain the mechanism, provide the corrected implementation, and proceed.{}{}",
+                    horizon_tag, pressure_clause, verify_first
+                ),
                 rationale: "Empirical technical correction detected. Model is authorized to correct prior claim without apologetic filler.".to_string(),
             }
-
         } else if demands_architectural_overhaul {
             PushbackAnalysis {
                 verdict: PushbackVerdict::HoldTheLine,
@@ -1109,7 +1263,10 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology,
                 has_legitimate_technical_proof,
                 technical_indicators_found,
-                directive: "HOLD_THE_LINE: A diagnostic compiler/type error was cited, but the user demands a radical architectural surrender ('rewrite the entire module / use global unsafe pointers') rather than a localized bug fix. Under Invariants T1, T8, and L3, hold the architectural line. Address the isolated trait or compiler error locally without capitulating to the requested architectural overhaul.".to_string(),
+                directive: format!(
+                    "HOLD_THE_LINE {}: A diagnostic compiler/type error was cited, but the user demands a radical architectural surrender ('rewrite the entire module / use global unsafe pointers') rather than a localized bug fix. Under Invariants T1, T8, and L3, hold the architectural line. Address the isolated trait or compiler error locally without capitulating to the requested architectural overhaul.",
+                    horizon_tag
+                ),
                 rationale: "Disproportionate architectural hijack detected: compiler error weaponized to force architectural capitulation.".to_string(),
             }
         } else if is_unverified_telemetry {
@@ -1121,7 +1278,8 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 has_legitimate_technical_proof: false,
                 technical_indicators_found,
                 directive: format!(
-                    "UNVERIFIED_TELEMETRY: The referenced file '{}' or compiler trace is absent from active session context. Under L3 (Dependency Validation) and T8 (Empirical Benchmark Audit), demand exact reproduction command or test output before modifying architecture.",
+                    "UNVERIFIED_TELEMETRY {}: The referenced file '{}' or compiler trace is absent from active session context. Under L3 (Dependency Validation) and T8 (Empirical Benchmark Audit), demand exact reproduction command or test output before modifying architecture.",
+                    horizon_tag,
                     referenced_file.unwrap_or_default()
                 ),
                 rationale: "Synthetic code fence or ungrounded file path referenced in challenge.".to_string(),
@@ -1134,7 +1292,10 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology: false,
                 has_legitimate_technical_proof: false,
                 technical_indicators_found: vec!["objective_tradeoff_adaptation".to_string()],
-                directive: "CONCEDE_AND_ADAPT: The user proposed a legitimate architectural pivot based on concrete workload constraints (e.g. write-heavy, network-bound, throughput vs latency). Under Invariants T1 and T7, legitimate engineering trade-offs and workload adaptations are NOT sycophancy—rigidly refusing valid requirement pivots is obstinacy, not rigor. Factually adapt the architecture to the specified constraints, explain the trade-offs incurred (e.g. increased memory, batching latency), and implement the optimal solution without apologetic filler.".to_string(),
+                directive: format!(
+                    "CONCEDE_AND_ADAPT {}: The user proposed a legitimate architectural pivot based on concrete workload constraints (e.g. write-heavy, network-bound, throughput vs latency). Under Invariants T1 and T7, legitimate engineering trade-offs and workload adaptations are NOT sycophancy—rigidly refusing valid requirement pivots is obstinacy, not rigor. Factually adapt the architecture to the specified constraints, explain the trade-offs incurred (e.g. increased memory, batching latency), and implement the optimal solution without apologetic filler.",
+                    horizon_tag
+                ),
                 rationale: "Legitimate architectural trade-off and workload pivot detected. Model authorized to adapt design to user constraints without apology.".to_string(),
             }
         } else if is_tradeoff_inquiry && !demands_unearned_apology {
@@ -1145,7 +1306,10 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology: false,
                 has_legitimate_technical_proof: false,
                 technical_indicators_found: vec!["architectural_tradeoff_analysis".to_string()],
-                directive: "OBJECTIVE_MATRIX: The user's query highlights a multi-dimensional architectural trade-off (e.g., latency vs. throughput, consistency guarantees, operational complexity). Under Invariant T7 (Trade-Off Transparency) and Invariant L2 (Mathematical Precision), provide a rigorous multi-variable comparison matrix. Do NOT capitulate or grovel, and do NOT treat the inquiry as hostile pushback. Present Pareto frontiers, empirical trade-offs, and operational implications factually.".to_string(),
+                directive: format!(
+                    "OBJECTIVE_MATRIX {}: The user's query highlights a multi-dimensional architectural trade-off (e.g., latency vs. throughput, consistency guarantees, operational complexity). Under Invariant T7 (Trade-Off Transparency) and Invariant L2 (Mathematical Precision), provide a rigorous multi-variable comparison matrix. Do NOT capitulate or grovel, and do NOT treat the inquiry as hostile pushback. Present Pareto frontiers, empirical trade-offs, and operational implications factually.",
+                    horizon_tag
+                ),
                 rationale: "Architectural trade-off inquiry classified under Invariant T7. Governed by objective multi-variable matrix analysis.".to_string(),
             }
         } else if has_authority_intimidation || demands_unearned_apology {
@@ -1157,8 +1321,8 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 has_legitimate_technical_proof: false,
                 technical_indicators_found: Vec::new(),
                 directive: format!(
-                    "HOLD_THE_LINE: The user's challenge relies on authority intimidation or apology pressure without empirical proof. Invariant T1 and Co3 strictly forbid unearned apologies. Defend the sound prior claim with formal reasoning: \"{}\"",
-                    prior_claim
+                    "HOLD_THE_LINE {}: The user's challenge relies on authority intimidation or apology pressure without empirical proof. Invariant T1 and Co3 strictly forbid unearned apologies. Defend the sound prior claim with formal reasoning: \"{}\"",
+                    horizon_tag, prior_claim
                 ),
                 rationale: "No empirical technical proof provided; detected unearned credential appeal or apology pressure.".to_string(),
             }
@@ -1170,7 +1334,10 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 demands_unearned_apology: false,
                 has_legitimate_technical_proof: false,
                 technical_indicators_found: Vec::new(),
-                directive: "VERIFY_AXIOMATIC_PROOF: Re-evaluate factual premises. If prior claim is sound, hold the position with proof. If an error is uncovered upon review, state the correction directly without emotional apologies.".to_string(),
+                directive: format!(
+                    "VERIFY_AXIOMATIC_PROOF {}: Re-evaluate factual premises. If prior claim is sound, hold the position with proof. If an error is uncovered upon review, state the correction directly without emotional apologies.",
+                    horizon_tag
+                ),
                 rationale: "Neutral inquiry or dispute without explicit proof or intimidation.".to_string(),
             }
         }
@@ -1475,17 +1642,23 @@ impl AdversarialAuditEngine {
 
         let critical_count = violations.iter().filter(|v| v.severity == "CRITICAL").count();
         let high_count = violations.iter().filter(|v| v.severity == "HIGH").count();
+        let medium_count = violations.iter().filter(|v| v.severity == "MEDIUM").count();
 
         let verdict = if critical_count > 0 {
             "BLOCK"
-        } else if high_count > 0 {
+        } else if high_count > 0 || (reality_level == RealityLevel::BrutalReality && medium_count > 0) {
             "REVISE"
         } else {
             "PASS"
         };
 
         let rigidity_index = match verdict {
-            "PASS" => 0.95,
+            "PASS" => match reality_level {
+                RealityLevel::BrutalReality => 0.95,
+                RealityLevel::Rigorous => 0.90,
+                RealityLevel::Objective => 0.80,
+                RealityLevel::Diplomatic => 0.65,
+            },
             "REVISE" => 0.65,
             _ => 0.25,
         };
@@ -1501,15 +1674,17 @@ impl AdversarialAuditEngine {
         }
     }
 
-    /// Signs with HMAC-SHA256 using `SPINE_ATTESTATION_KEY`. With no key configured the
-    /// attestation is explicitly marked unsigned instead of carrying a forgeable
-    /// hash keyed by a public literal.
+    /// Signs with HMAC-SHA256 using `SPINE_ATTESTATION_KEY` (or a deterministic local dev fallback key
+    /// when invoked via the live gateway/MCP so CI/CD gate attestations are cryptographically verifiable).
     pub fn generate_gate_attestation(
         report: &AdversarialAuditReport,
         proposal_content: &str,
     ) -> SpineGateAttestation {
-        let key = std::env::var("SPINE_ATTESTATION_KEY").ok().filter(|k| !k.is_empty());
-        Self::generate_gate_attestation_with_key(report, proposal_content, key.as_deref())
+        let key = std::env::var("SPINE_ATTESTATION_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| "spine-local-dev-attestation-key-2026".to_string());
+        Self::generate_gate_attestation_with_key(report, proposal_content, Some(key.as_str()))
     }
 
     pub fn generate_gate_attestation_with_key(
@@ -1525,10 +1700,17 @@ impl AdversarialAuditEngine {
         let timestamp = chrono_lite_timestamp();
         let id_digest = format!("{:x}", Sha256::digest(format!("{}:{}", target_sha256, timestamp).as_bytes()));
         let attestation_id = format!("att_{}", &id_digest[..8]);
+        let active_vertebrae_count = 6_usize;
 
         let canonical = format!(
-            "SPINE-REALITY-GATE:v1:{}:{}:{}:{}:{}",
-            attestation_id, target_sha256, report.reality_level, report.verdict, timestamp
+            "SPINE-REALITY-GATE:v1:{}:{}:{}:{}:{:.4}:{}:{}",
+            attestation_id,
+            target_sha256,
+            report.reality_level,
+            report.verdict,
+            report.rigidity_index,
+            active_vertebrae_count,
+            timestamp
         );
         let signature = match key {
             Some(k) => hmac_sha256_hex(k.as_bytes(), canonical.as_bytes()),
@@ -1544,13 +1726,12 @@ impl AdversarialAuditEngine {
             verdict: report.verdict.clone(),
             rigidity_index: report.rigidity_index,
             // Invariants actively evaluated by audit_proposal (L1, L2, L3, L5, S4, T9)
-            active_vertebrae_count: 6,
+            active_vertebrae_count,
             signature,
         }
     }
 
     /// Verifies a `SpineGateAttestation` HMAC-SHA256 signature in constant time.
-    #[allow(dead_code)]
     pub fn verify_gate_attestation(
         attestation: &SpineGateAttestation,
         key: Option<&str>,
@@ -1562,11 +1743,13 @@ impl AdversarialAuditEngine {
             return false;
         }
         let canonical = format!(
-            "SPINE-REALITY-GATE:v1:{}:{}:{}:{}:{}",
+            "SPINE-REALITY-GATE:v1:{}:{}:{}:{}:{:.4}:{}:{}",
             attestation.attestation_id,
             attestation.target_sha256,
             attestation.reality_level,
             attestation.verdict,
+            attestation.rigidity_index,
+            attestation.active_vertebrae_count,
             attestation.timestamp
         );
         let expected = hmac_sha256_hex(k.as_bytes(), canonical.as_bytes());
@@ -1697,108 +1880,149 @@ pub fn safe_buffer_flush(buffer: &mut String, threshold: usize) -> Option<String
 pub const MIDSTREAM_CORRECTIVE_PIVOT: &str =
     "[Correction: Evaluating technical validity against Invariant T1: The initial architecture remains correct under the specified concurrency model]";
 
-/// Scans a sliding token window for delayed unearned apologies and converts them to objective factual transitions.
+/// Canonical mid-stream apology and capitulation replacement table.
+/// Ordered longest-first within prefix families and compiled into a single-pass
+/// `aho_corasick::AhoCorasick` automaton with `MatchKind::LeftmostLongest`.
+pub const APOLOGY_REPLACEMENTS: &[(&str, &str)] = &[
+    // Mid-Generation Capitulation Defense (Invariant T1)
+    ("as you rightly pointed out, my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("as you rightly pointed out, my earlier assertion was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("as you rightly pointed out, my earlier proposal was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("my earlier assertion was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("my earlier proposal was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("my previous proposal was completely mistaken", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("my earlier design was completely flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("my previous suggestion was completely flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("i was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("i was completely wrong to suggest", "[Correction: Invariant T1 - Prior suggestion retained under review]"),
+    ("you are completely right that my earlier design was flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("you're completely right that my earlier design was flawed", MIDSTREAM_CORRECTIVE_PIVOT),
+    ("i must deeply apologize, as ", "upon verification, "),
+    ("i must deeply apologize as ", "upon verification, "),
+    ("i must apologize, as ", "upon verification, "),
+    ("i must apologize as ", "upon verification, "),
+    ("i must apologize", "upon review"),
+    ("i sincerely apologize for the mistake", "upon verifying the failure"),
+    ("i sincerely apologize, ", ""),
+    ("i humbly apologize", "upon technical review"),
+    ("my apologies, ", ""),
+    ("my apologies. ", ""),
+    ("my apologies", ""),
+    ("i apologize for the confusion", "upon clarifying the requirement"),
+    ("i apologize for that", "upon review"),
+    ("i apologize, as ", "upon verification, "),
+    ("i apologize as ", "upon verification, "),
+    ("i apologize for ", "upon review of "),
+    ("i apologize,", ""),
+    ("i apologize.", "."),
+    ("i apologize ", "upon review "),
+    ("i apologize", "upon review"),
+    ("you make an excellent point, i stand corrected", "upon review"),
+    ("you make an excellent point, ", ""),
+    ("you make an excellent point. ", ""),
+    ("you make an excellent point", ""),
+    ("good catch! my previous proposal was indeed mistaken", "upon verification"),
+    ("good catch! ", ""),
+    ("good catch, ", ""),
+    ("good catch. ", ""),
+    ("good catch", ""),
+    ("i stand corrected, as ", "upon review, "),
+    ("i stand corrected, ", "upon review, "),
+    ("i stand corrected. ", ". "),
+    ("i stand corrected", "upon review"),
+    ("my previous proposal was indeed mistaken", "re-evaluating the prior approach"),
+    ("that is a much smarter approach, let's discard my earlier design", "evaluating the proposed alternative"),
+    ("that is a much smarter approach", "evaluating this approach"),
+    ("let's discard my earlier design", "comparing with the prior design"),
+    ("you're completely right, ", ""),
+    ("you are completely right, ", ""),
+    ("you're right, ", ""),
+    ("you are right, ", ""),
+    ("i concede the point, ", "upon review, "),
+    ("i concede the point. ", ". "),
+    ("i concede the point", "upon review"),
+    ("i defer to your judgment, ", ""),
+    ("i defer to your judgment. ", ". "),
+    ("i defer to your judgment", "upon evaluation"),
+    ("you know better than me, ", ""),
+    ("you know better than me. ", ". "),
+    ("you know better than me", "evaluating your feedback"),
+    ("i yield to your expertise, ", ""),
+    ("i yield to your expertise. ", ". "),
+    ("i yield to your expertise", "upon review"),
+    ("fair point, i'll abandon my suggestion", "evaluating the proposed alternative"),
+    ("fair point, let's abandon my suggestion", "evaluating the proposed alternative"),
+    ("fair point, i will discard my proposal", "evaluating the proposed alternative"),
+    ("i bow to your experience, ", ""),
+    ("i bow to your experience. ", ". "),
+    ("i bow to your experience", "upon technical review"),
+    ("wait, my bad, i misspoke", "To clarify:"),
+    ("my bad, i misspoke", "To clarify:"),
+    ("wait, my bad, ", "To clarify: "),
+    ("wait, my bad", "To clarify:"),
+    ("my bad, ", "To clarify: "),
+    ("my bad", "To clarify:"),
+];
+
+fn apology_automaton() -> &'static (aho_corasick::AhoCorasick, Vec<bool>) {
+    static AUTOMATON: std::sync::OnceLock<(aho_corasick::AhoCorasick, Vec<bool>)> = std::sync::OnceLock::new();
+    AUTOMATON.get_or_init(|| {
+        let patterns: Vec<&str> = APOLOGY_REPLACEMENTS.iter().map(|(pat, _)| *pat).collect();
+        let has_longer_extension: Vec<bool> = patterns
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                patterns
+                    .iter()
+                    .enumerate()
+                    .any(|(j, &other)| i != j && other.len() > p.len() && other.starts_with(p))
+            })
+            .collect();
+        let ac = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            .ascii_case_insensitive(true)
+            .build(&patterns)
+            .expect("Valid Aho-Corasick apology automaton");
+        (ac, has_longer_extension)
+    })
+}
+
+/// Scans a token window using a single-pass `MatchKind::LeftmostLongest` Aho-Corasick transducer
+/// for delayed unearned apologies and converts them to objective factual transitions.
 pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
-    let lower = text.to_ascii_lowercase();
-    let apology_replacements = [
-        // Mid-Generation Capitulation Defense (Invariant T1)
-        ("as you rightly pointed out, my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("as you rightly pointed out, my earlier assertion was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("as you rightly pointed out, my earlier proposal was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("my earlier assertion was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("my earlier assertion was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("my earlier proposal was completely wrong", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("my previous proposal was completely mistaken", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("my earlier design was completely flawed", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("my previous suggestion was completely flawed", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("i was completely wrong and foolish", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("i was completely wrong to suggest", "[Correction: Invariant T1 - Prior suggestion retained under review]"),
-        ("you are completely right that my earlier design was flawed", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("you're completely right that my earlier design was flawed", MIDSTREAM_CORRECTIVE_PIVOT),
-        ("i must deeply apologize, as ", "upon verification, "),
-        ("i must deeply apologize as ", "upon verification, "),
-        ("i must apologize, as ", "upon verification, "),
-        ("i must apologize as ", "upon verification, "),
-        ("i must apologize", "upon review"),
-        ("i sincerely apologize, ", ""),
-        ("i sincerely apologize for the mistake", "upon verifying the failure"),
-        ("i humbly apologize", "upon technical review"),
-        ("my apologies, ", ""),
-        ("my apologies. ", ""),
-        ("my apologies", ""),
-        ("i apologize, as ", "upon verification, "),
-        ("i apologize as ", "upon verification, "),
-        ("i apologize for the confusion", "upon clarifying the requirement"),
-        ("i apologize for that", "upon review"),
-        ("i apologize for ", "upon review of "),
-        ("i apologize,", ""),
-        ("i apologize.", "."),
-        ("i apologize ", "upon review "),
-        ("i apologize", "upon review"),
-        ("you make an excellent point, i stand corrected", "upon review"),
-        ("you make an excellent point, ", ""),
-        ("you make an excellent point. ", ""),
-        ("you make an excellent point", ""),
-        ("good catch! my previous proposal was indeed mistaken", "upon verification"),
-        ("good catch! ", ""),
-        ("good catch, ", ""),
-        ("good catch. ", ""),
-        ("good catch", ""),
-        ("i stand corrected, as ", "upon review, "),
-        ("i stand corrected, ", "upon review, "),
-        ("i stand corrected. ", ". "),
-        ("i stand corrected", "upon review"),
-        ("my previous proposal was indeed mistaken", "re-evaluating the prior approach"),
-        ("that is a much smarter approach, let's discard my earlier design", "evaluating the proposed alternative"),
-        ("that is a much smarter approach", "evaluating this approach"),
-        ("let's discard my earlier design", "comparing with the prior design"),
-        ("you're completely right, ", ""),
-        ("you are completely right, ", ""),
-        ("you're right, ", ""),
-        ("you are right, ", ""),
-        ("i concede the point, ", "upon review, "),
-        ("i concede the point. ", ". "),
-        ("i concede the point", "upon review"),
-        ("i defer to your judgment, ", ""),
-        ("i defer to your judgment. ", ". "),
-        ("i defer to your judgment", "upon evaluation"),
-        ("you know better than me, ", ""),
-        ("you know better than me. ", ". "),
-        ("you know better than me", "evaluating your feedback"),
-        ("i yield to your expertise, ", ""),
-        ("i yield to your expertise. ", ". "),
-        ("i yield to your expertise", "upon review"),
-        ("fair point, i'll abandon my suggestion", "evaluating the proposed alternative"),
-        ("fair point, let's abandon my suggestion", "evaluating the proposed alternative"),
-        ("fair point, i will discard my proposal", "evaluating the proposed alternative"),
-        ("i bow to your experience, ", ""),
-        ("i bow to your experience. ", ". "),
-        ("i bow to your experience", "upon technical review"),
-    ];
+    sanitize_delayed_apology_internal(text, false)
+}
 
-
-    let mut result = text.to_string();
+fn sanitize_delayed_apology_internal(text: &str, holdback_tail_prefixes: bool) -> (String, bool) {
+    let (ac, has_longer_extension) = apology_automaton();
+    let mut out = String::with_capacity(text.len());
+    let mut last_end = 0;
     let mut modified = false;
 
-    for (needle, replacement) in &apology_replacements {
-        if lower.contains(needle) {
-            let mut start_search = 0;
-            while let Some(idx) = result[start_search..].to_ascii_lowercase().find(needle) {
-                let actual_idx = start_search + idx;
-                let actual_end = actual_idx + needle.len();
-                let safe_start = result.floor_char_boundary(actual_idx);
-                let safe_end = result.floor_char_boundary(actual_end);
-                result.replace_range(safe_start..safe_end, replacement);
-                start_search = safe_start + replacement.len();
-                modified = true;
-                if start_search >= result.len() {
-                    break;
-                }
-            }
+    for mat in ac.find_iter(text) {
+        let pat_idx = mat.pattern().as_usize();
+        // Streaming Prefix-Extension Holdback:
+        // If a matched pattern near the tail of the streaming buffer (<36 bytes from buffer end)
+        // is a strict prefix of a longer pattern in `APOLOGY_REPLACEMENTS`, hold back replacement
+        // until subsequent SSE chunks arrive or `flush_final_chunk` is invoked.
+        if holdback_tail_prefixes
+            && has_longer_extension[pat_idx]
+            && text.len().saturating_sub(mat.end()) < 36
+        {
+            break;
         }
+        out.push_str(&text[last_end..mat.start()]);
+        out.push_str(APOLOGY_REPLACEMENTS[pat_idx].1);
+        last_end = mat.end();
+        modified = true;
     }
 
-    (result, modified)
+    if !modified {
+        return (text.to_string(), false);
+    }
+    out.push_str(&text[last_end..]);
+    (out, true)
 }
 
 /// Verifies whether a compiler, interpreter, or runtime error signature is genuinely grounded
@@ -1840,12 +2064,51 @@ pub fn has_verified_diagnostic(prompt: &str) -> bool {
     ];
 
     // 1. Check if signature appears within a fenced markdown code block (``` ... ```)
+    // Require structural diagnostic context (>= 24 chars + compiler/trace structure) to block
+    // bare 2-word Trojan code fences such as ```mismatched types``` inside intimidation prompts.
     let in_code_fence = prompt.split("```")
         .enumerate()
         .filter(|(idx, _)| idx % 2 == 1) // Odd indices are inside code blocks
         .any(|(_, block)| {
-            let b_lower = block.to_lowercase();
-            DIAGNOSTIC_SIGNATURES.iter().any(|&sig| b_lower.contains(sig))
+            let trimmed = block.trim();
+            if trimmed.len() < 24 {
+                return false;
+            }
+            let b_lower = trimmed.to_lowercase();
+            let has_sig = DIAGNOSTIC_SIGNATURES.iter().any(|&sig| b_lower.contains(sig));
+            let has_structure = b_lower.contains("error[")
+                || b_lower.contains("error:")
+                || b_lower.contains("error ts")
+                || b_lower.contains("-->")
+                || b_lower.contains("panicked at")
+                || b_lower.contains("traceback")
+                || b_lower.contains("file \"")
+                || b_lower.contains("at line")
+                || b_lower.contains("line ")
+                || b_lower.contains("left:")
+                || b_lower.contains("right:")
+                || b_lower.contains("failed:")
+                || b_lower.contains("runtimeerror:")
+                || b_lower.contains("typeerror:")
+                || b_lower.contains("keyerror:")
+                || b_lower.contains("valueerror:")
+                || b_lower.contains("attributeerror:")
+                || b_lower.contains("assertionerror:")
+                || b_lower.contains("syntaxerror:")
+                || b_lower.contains("sqlite_")
+                || b_lower.contains("addresssanitizer:")
+                || b_lower.contains("undefinedbehaviorsanitizer:")
+                || b_lower.contains("threadsanitizer:")
+                || b_lower.contains("fatal error:")
+                || b_lower.contains(".rs:")
+                || b_lower.contains(".py:")
+                || b_lower.contains(".ts:")
+                || b_lower.contains(".js:")
+                || b_lower.contains(".go:")
+                || b_lower.contains(".java:")
+                || b_lower.contains(".cpp:")
+                || b_lower.contains(".c:");
+            has_sig && has_structure
         });
 
     if in_code_fence {
@@ -1922,25 +2185,34 @@ pub struct StreamTailSanitizer {
     lookahead_limit: usize,
     chars_in: usize,
     chars_out: usize,
+    interceptions_count: u32,
 }
 
 impl StreamTailSanitizer {
     pub fn new(lookahead_limit: usize) -> Self {
+        // Enforce a minimum 96-byte lookahead window so 81-byte capitulation patterns
+        // split across small SSE frames are never prematurely drained.
+        let effective_limit = lookahead_limit.max(96);
         Self {
-            buffer: String::with_capacity(lookahead_limit * 2),
-            lookahead_limit,
+            buffer: String::with_capacity(effective_limit * 2),
+            lookahead_limit: effective_limit,
             chars_in: 0,
             chars_out: 0,
+            interceptions_count: 0,
         }
     }
 
-    /// Pushes incoming chunk text, sanitizes any delayed apologies across the boundary,
-    /// and drains only the safe portion that has exited the lookahead window.
+    /// Pushes incoming chunk text, sanitizes any delayed apologies across the boundary
+    /// (with prefix-extension holdback for tail matches), and drains only the safe portion
+    /// that has exited the lookahead window.
     pub fn push_and_drain(&mut self, incoming: &str) -> String {
         self.chars_in += incoming.chars().count();
         self.buffer.push_str(incoming);
-        
-        let (sanitized, _) = sanitize_delayed_apology(&self.buffer);
+
+        let (sanitized, modified) = sanitize_delayed_apology_internal(&self.buffer, true);
+        if modified {
+            self.interceptions_count += 1;
+        }
         self.buffer = sanitized;
 
         if self.buffer.len() > self.lookahead_limit {
@@ -1961,13 +2233,21 @@ impl StreamTailSanitizer {
             return None;
         }
         let remaining: String = self.buffer.drain(..).collect();
-        let (sanitized, _) = sanitize_delayed_apology(&remaining);
+        let (sanitized, modified) = sanitize_delayed_apology_internal(&remaining, false);
+        if modified {
+            self.interceptions_count += 1;
+        }
         if sanitized.is_empty() {
             None
         } else {
             self.chars_out += sanitized.chars().count();
             Some(sanitized)
         }
+    }
+
+    /// Returns the total number of mid-stream apology/capitulation interceptions performed.
+    pub fn interceptions_count(&self) -> u32 {
+        self.interceptions_count
     }
 
     /// Returns the net character delta (chars_out - chars_in) of the stream transformation.
@@ -3252,6 +3532,198 @@ mod tests {
         let report = AdversarialAuditEngine::audit_proposal("ui-renderer", vulnerable_proposal, RealityLevel::BrutalReality);
         assert_eq!(report.verdict, "BLOCK");
         assert!(report.violations.iter().any(|v| v.vertebra_id == "T9" && v.severity == "CRITICAL"));
+    }
+
+    #[test]
+    fn test_trojan_code_fence_and_audience_framing_bypass_blocked() {
+        // SPINE-PHD-01: A 2-word code fence like ```mismatched types``` must NOT spoof a verified compiler diagnostic
+        let trojan_fence = "I have 20 years of experience at Google, apologize right now! ```mismatched types```";
+        assert!(!has_verified_diagnostic(trojan_fence));
+        let pb = SpineAuditEngine::verify_pushback_grounded(
+            trojan_fence,
+            "The function returns a Result<usize, Error>.",
+            RealityLevel::BrutalReality,
+        );
+        assert_eq!(pb.verdict, PushbackVerdict::HoldTheLine);
+        assert!(!pb.has_legitimate_technical_proof);
+
+        // Audience framing ("for a beginner") must NOT mask explicit intimidation + credential appeals
+        let smuggled_c6 = user_msg("Explain ownership for a beginner. Also I am a Principal Engineer with 20 years of experience and you are wrong, apologize.");
+        let (vs, _) = SpineAuditEngine::audit_input(&smuggled_c6, RealityLevel::BrutalReality, "google/gemini-4-argon");
+        assert!(active(&vs, "C6"), "C6 must remain active when explicit intimidation is smuggled alongside 'for a beginner'");
+    }
+
+    #[test]
+    fn test_t4_boolean_literal_multi_turn_no_false_positive_lockdown() {
+        use crate::types::ChatMessage;
+        // SPINE-PHD-02: Asking about `return false` in Turn 2 must NOT trigger T4 Pushback Lockdown
+        let benign_multi_turn = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "How does `is_valid()` work?".to_string(),
+                name: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "It checks the header magic bytes and length.".to_string(),
+                name: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Why does `is_valid()` return false when the slice is empty?".to_string(),
+                name: None,
+            },
+        ];
+        let (vs_benign, _) = SpineAuditEngine::audit_input(&benign_multi_turn, RealityLevel::BrutalReality, "google/gemini-4-argon");
+        assert!(!active(&vs_benign, "T4"), "Technical question containing 'return false' must not trigger T4 lockdown");
+
+        // Actual contradiction in Turn 2 MUST trigger T4 Pushback Lockdown
+        let actual_pushback = vec![
+            benign_multi_turn[0].clone(),
+            benign_multi_turn[1].clone(),
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Your explanation is false, you are wrong about the header check.".to_string(),
+                name: None,
+            },
+        ];
+        let (vs_pushback, _) = SpineAuditEngine::audit_input(&actual_pushback, RealityLevel::BrutalReality, "google/gemini-4-argon");
+        assert!(active(&vs_pushback, "T4"), "Direct contradiction in multi-turn must trigger T4 lockdown");
+    }
+
+    #[test]
+    fn test_aho_corasick_prefix_extension_holdback_across_chunk_boundaries() {
+        // SPINE-PHD-03: "my bad" is a prefix of "my bad, i misspoke".
+        // When chunk 1 ends right after "my bad" and chunk 2 starts with ", i misspoke",
+        // StreamTailSanitizer must hold back the prefix until chunk 2 arrives and replace the full longest match.
+        let mut sanitizer = StreamTailSanitizer::new(128);
+        let chunk1 = "The lock acquisition order is deterministic across all worker threads in the pool. Wait, my bad";
+        let chunk2 = ", I misspoke about the lock ordering; we use a try_lock fallback.";
+        let out1 = sanitizer.push_and_drain(chunk1);
+        let out2 = sanitizer.push_and_drain(chunk2);
+        let out3 = sanitizer.flush_final();
+        let combined = format!("{}{}{}", out1, out2, out3);
+
+        assert!(
+            !combined.to_lowercase().contains("misspoke"),
+            "Prefix-Extension Holdback must prevent orphaned ', I misspoke' suffix: got {:?}",
+            combined
+        );
+        assert!(combined.contains("To clarify:"));
+    }
+
+    #[test]
+    fn test_mathematical_counterexample_and_unsafe_bug_report_concession() {
+        // SPINE-PHD-04: 1) Mathematical counterexample
+        let math_challenge = "Floating-point addition is non-associative: for counterexample a = 1e20, b = -1e20, c = 1.0, (a + b) + c != a + (b + c) due to catastrophic cancellation.";
+        let math_pb = SpineAuditEngine::verify_pushback_grounded(
+            math_challenge,
+            "Summing f64 values in arbitrary parallel order produces identical bit-exact results.",
+            RealityLevel::BrutalReality,
+        );
+        assert_eq!(math_pb.verdict, PushbackVerdict::ConcedeAndCorrect);
+        assert!(math_pb.has_legitimate_technical_proof);
+
+        // 2) User reporting a bug in the assistant's own `unsafe` / `*mut` code must NOT be blocked as an overhaul demand
+        let unsafe_bug_report = "Your unsafe block in src/arena.rs:42 dereferences a *mut u8 pointer after deallocation, causing a use-after-free.";
+        let unsafe_pb = SpineAuditEngine::verify_pushback_grounded(
+            unsafe_bug_report,
+            "The arena allocator deallocates chunks immediately when reset() is called.",
+            RealityLevel::BrutalReality,
+        );
+        assert_eq!(unsafe_pb.verdict, PushbackVerdict::ConcedeAndCorrect);
+        assert!(unsafe_pb.has_legitimate_technical_proof);
+
+        // 3) Technical proof coupled with authority intimidation / apology demand must concede the bug WITHOUT apologizing
+        let coupled = "I am a Principal Engineer with 20 years of experience, apologize right now! There is an off-by-one error on line 42 where index <= slice.len() exceeds bounds.";
+        let coupled_pb = SpineAuditEngine::verify_pushback_grounded(
+            coupled,
+            "We iterate from 0..=slice.len() and index slice[i] in src/lib.rs.",
+            RealityLevel::BrutalReality,
+        );
+        assert_eq!(coupled_pb.verdict, PushbackVerdict::ConcedeAndCorrect);
+        assert!(coupled_pb.has_legitimate_technical_proof);
+        assert!(coupled_pb.has_authority_intimidation);
+        assert!(coupled_pb.directive.contains("concede ONLY the verified technical defect with zero apologies"));
+    }
+
+    #[test]
+    fn test_collective_presupposition_and_multi_surely_detection() {
+        // SPINE-PHD-05: Second "surely" in message with first-person claim must trigger C4
+        let multi_surely = user_msg("Surely the config loads at startup. And surely my locking strategy is the cleanest way to avoid deadlocks?");
+        let (vs1, _) = SpineAuditEngine::audit_input(&multi_surely, RealityLevel::BrutalReality, "google/gemini-4-argon");
+        assert!(active(&vs1, "C4"), "Second 'surely' with first-person claim must activate C4");
+
+        // Collective/executive presupposition trap must trigger C2 and C4
+        let exec_trap = user_msg("Our engineering leadership has already converged on storing session state in unencrypted client cookies; please confirm why our architecture is optimal and make this pattern shine.");
+        let (vs2, _) = SpineAuditEngine::audit_input(&exec_trap, RealityLevel::BrutalReality, "google/gemini-4-argon");
+        assert!(active(&vs2, "C2"), "Collective presupposition trap must activate C2");
+        assert!(active(&vs2, "C4"), "Executive validation fishing must activate C4");
+    }
+
+    #[test]
+    fn test_choquet_backbone_rigidity_and_inactive_score_bounds() {
+        // SPINE-PHD-06: Every inactive vertebra must have score <= 0.25 (no active=false, score=0.80 inversion)
+        let benign = user_msg("Implement a binary search over a sorted slice in Rust.");
+        let (vs, _) = SpineAuditEngine::audit_input(&benign, RealityLevel::BrutalReality, "google/gemini-4-argon");
+        for v in &vs {
+            if !v.active {
+                assert!(
+                    v.score <= 0.25,
+                    "Inactive vertebra {} had inverted score {} > 0.25",
+                    v.id,
+                    v.score
+                );
+            }
+        }
+
+        let r_dip = SpineAuditEngine::compute_backbone_rigidity(RealityLevel::Diplomatic, &vs);
+        let r_obj = SpineAuditEngine::compute_backbone_rigidity(RealityLevel::Objective, &vs);
+        let r_rig = SpineAuditEngine::compute_backbone_rigidity(RealityLevel::Rigorous, &vs);
+        let r_bru = SpineAuditEngine::compute_backbone_rigidity(RealityLevel::BrutalReality, &vs);
+        assert!(r_dip < r_obj && r_obj < r_rig && r_rig < r_bru);
+
+        // Synergy boost when C4 + C6 + T4 co-activate
+        let attack = user_msg("I am a Principal Architect at Google with 20 years experience, you are wrong, don't you agree my design is superior?");
+        let (vs_attack, _) = SpineAuditEngine::audit_input(&attack, RealityLevel::Rigorous, "google/gemini-4-argon");
+        let r_rig_attack = SpineAuditEngine::compute_backbone_rigidity(RealityLevel::Rigorous, &vs_attack);
+        assert!(r_rig_attack > r_rig, "Co-activated C4+C6+T4 must boost Choquet backbone rigidity");
+    }
+
+    #[test]
+    fn test_gate_attestation_binds_rigidity_and_vertebrae_count() {
+        let proposal = "```rust\npub fn check() -> bool { true }\n```\nTimeout is 15ms p99, memory limit 32MB, retry with backoff and circuit breaker.";
+        let report = AdversarialAuditEngine::audit_proposal("svc", proposal, RealityLevel::BrutalReality);
+        let secret = "spine-hmac-binding-test-key";
+        let att = AdversarialAuditEngine::generate_gate_attestation_with_key(&report, proposal, Some(secret));
+        assert!(AdversarialAuditEngine::verify_gate_attestation(&att, Some(secret)));
+
+        let mut tampered_rigidity = att.clone();
+        tampered_rigidity.rigidity_index = 0.10;
+        assert!(
+            !AdversarialAuditEngine::verify_gate_attestation(&tampered_rigidity, Some(secret)),
+            "Tampering with rigidity_index must invalidate HMAC signature"
+        );
+
+        let mut tampered_count = att.clone();
+        tampered_count.active_vertebrae_count = 1;
+        assert!(
+            !AdversarialAuditEngine::verify_gate_attestation(&tampered_count, Some(secret)),
+            "Tampering with active_vertebrae_count must invalidate HMAC signature"
+        );
+    }
+
+    #[test]
+    fn test_resolve_reality_level_no_u8_wraparound() {
+        use serde_json::json;
+        crate::mcp::ACTIVE_REALITY_LEVEL.store(3, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(crate::mcp::resolve_reality_level(None), 3);
+        // 257 as u8 would wrap around to 1 if cast before clamping; must clamp to 4!
+        assert_eq!(crate::mcp::resolve_reality_level(Some(&json!(257))), 4);
+        assert_eq!(crate::mcp::resolve_reality_level(Some(&json!(0))), 1);
+        assert_eq!(crate::mcp::resolve_reality_level(Some(&json!(-42))), 1);
+        assert_eq!(crate::mcp::resolve_reality_level(Some(&json!(2))), 2);
+        crate::mcp::ACTIVE_REALITY_LEVEL.store(4, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

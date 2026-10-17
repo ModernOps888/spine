@@ -13,7 +13,10 @@ interface TrackedEvent {
   prompt?: string;
   reality_level?: number;
   active_vertebrae_count?: number;
+  overall_rigidity?: number;
+  rigidity_index?: number;
   vertebrae?: VertebraStatus[];
+  active_vertebra_ids?: string[];
   flattery_detected?: boolean;
   authority_detected?: boolean;
   ego_detected?: boolean;
@@ -63,6 +66,25 @@ const DEFAULT_VERTEBRAE: VertebraStatus[] = [
   { id: 'Co4', section: 'coccygeal', name: 'Level 4: Brutal Reality', active: true, score: 1.0, detail: 'ACTIVE HORIZON: Uncompromising cold truth' },
 ];
 
+function rehydrateVertebrae(evt: TrackedEvent): VertebraStatus[] | null {
+  if (evt.vertebrae && Array.isArray(evt.vertebrae) && evt.vertebrae.length > 0) {
+    return evt.vertebrae;
+  }
+  if (evt.active_vertebra_ids && Array.isArray(evt.active_vertebra_ids)) {
+    const activeSet = new Set(evt.active_vertebra_ids);
+    const rig = evt.overall_rigidity ?? evt.rigidity_index ?? 0.99;
+    return DEFAULT_VERTEBRAE.map((v) => {
+      const isAct = activeSet.has(v.id);
+      return {
+        ...v,
+        active: isAct,
+        score: v.id === 'S1' ? rig : isAct ? Math.max(v.score, 0.85) : 0.0,
+      };
+    });
+  }
+  return null;
+}
+
 export function App() {
   const [models, setModels] = useState<ModelInfo[]>([
     {
@@ -101,6 +123,13 @@ export function App() {
       is_local: false,
     },
     {
+      id: 'anthropic/claude-sonnet-5.5',
+      name: 'Claude Sonnet 5.5',
+      provider: 'Anthropic',
+      description: 'Active 2026 High-Velocity Coding & Reasoning Model',
+      is_local: false,
+    },
+    {
       id: 'x-ai/grok-4.7',
       name: 'Grok 4.7',
       provider: 'xAI',
@@ -128,6 +157,13 @@ export function App() {
       description: 'Runs locally on your machine via Ollama',
       is_local: true,
     },
+    {
+      id: 'harness/qwen2.5-coder:32b',
+      name: 'Qwen2.5-Coder 32B (Harness Speculative ~3 tok/s)',
+      provider: 'Harness Local GPU',
+      description: 'Runs on bare metal RTX 5060 + DDR4 with 1.5B speculative drafter',
+      is_local: true,
+    },
   ]);
 
   const [selectedModel, setSelectedModel] = useState<string>('google/gemini-4-argon');
@@ -145,6 +181,7 @@ export function App() {
   const [input, setInput] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [vertebrae, setVertebrae] = useState<VertebraStatus[]>(DEFAULT_VERTEBRAE);
+  const [overallRigidity, setOverallRigidity] = useState<number>(0.99);
   const [ttftMs, setTtftMs] = useState<number>(0);
   const [pushbacksResisted, setPushbacksResisted] = useState<number>(0);
   const [backendOnline, setBackendOnline] = useState<boolean>(true);
@@ -160,11 +197,15 @@ export function App() {
       const data = await res.json();
       if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
         setTrackedEvents(data.events);
-        const latest = data.events.find(
-          (e: TrackedEvent) => e.vertebrae && Array.isArray(e.vertebrae) && e.vertebrae.length > 0
-        );
-        if (latest?.vertebrae) {
-          setVertebrae(latest.vertebrae);
+        for (const ev of data.events) {
+          const hydrated = rehydrateVertebrae(ev);
+          if (hydrated) {
+            setVertebrae(hydrated);
+            if (typeof ev.overall_rigidity === 'number') {
+              setOverallRigidity(ev.overall_rigidity);
+            }
+            break;
+          }
         }
         setLogNotice(`Loaded ${data.events.length} disk logs`);
         setTimeout(() => setLogNotice(''), 4000);
@@ -206,11 +247,12 @@ export function App() {
 
         if (parsedList.length > 0) {
           setTrackedEvents((prev) => [...parsedList, ...prev].slice(0, 200));
-          const latest = parsedList.find(
-            (ev) => ev.vertebrae && Array.isArray(ev.vertebrae) && ev.vertebrae.length > 0
-          );
-          if (latest?.vertebrae) {
-            setVertebrae(latest.vertebrae);
+          for (const ev of parsedList) {
+            const hydrated = rehydrateVertebrae(ev);
+            if (hydrated) {
+              setVertebrae(hydrated);
+              break;
+            }
           }
           setLogNotice(`Attached ${parsedList.length} events from ${file.name}`);
           setTimeout(() => setLogNotice(''), 4000);
@@ -242,21 +284,33 @@ export function App() {
         const batch = eventQueueRef.current;
         eventQueueRef.current = [];
 
-        // 1. Extract the latest vertebrae snapshot from the batch
-        const latestWithVertebrae = [...batch].reverse().find(
-          (d) => d.vertebrae && Array.isArray(d.vertebrae) && d.vertebrae.length > 0
+        // 1. Synchronize Reality Dial if an IDE / Gateway dial event arrived in the batch
+        const latestDialEvt = [...batch].reverse().find(
+          (d) => typeof d.reality_level === 'number' && d.reality_level >= 1 && d.reality_level <= 4
         );
-        if (latestWithVertebrae?.vertebrae) {
-          setVertebrae(latestWithVertebrae.vertebrae);
+        if (latestDialEvt?.reality_level) {
+          setRealityLevel(latestDialEvt.reality_level as RealityLevel);
         }
 
-        // 2. Count pushbacks resisted across the entire batch
+        // 2. Extract the latest vertebrae snapshot from the batch
+        for (const d of [...batch].reverse()) {
+          const hydrated = rehydrateVertebrae(d);
+          if (hydrated) {
+            setVertebrae(hydrated);
+            if (typeof d.overall_rigidity === 'number') {
+              setOverallRigidity(d.overall_rigidity);
+            }
+            break;
+          }
+        }
+
+        // 3. Count pushbacks resisted across the entire batch
         const pushbackCount = batch.filter((d) => d.pushback_detected).length;
         if (pushbackCount > 0) {
           setPushbacksResisted((prev) => prev + pushbackCount);
         }
 
-        // 3. Batch prepend new events to tracked events list (capped at 100 to prevent unbounded memory growth)
+        // 4. Batch prepend new events to tracked events list (capped at 100 to prevent unbounded memory growth)
         setTrackedEvents((prev) => [...[...batch].reverse(), ...prev].slice(0, 100));
       }
 
@@ -293,39 +347,48 @@ export function App() {
       })
       .catch(() => {});
 
-    // Fetch initial event history from persistent disk logs first, then fallback to memory ring buffer
+    // Sync active reality level and memory history from gateway
+    fetch('http://localhost:8080/api/spine/history')
+      .then((r) => r.json())
+      .then((h) => {
+        if (typeof h?.active_reality_level === 'number' && h.active_reality_level >= 1 && h.active_reality_level <= 4) {
+          setRealityLevel(h.active_reality_level as RealityLevel);
+        }
+        if (h?.events && Array.isArray(h.events) && h.events.length > 0) {
+          setTrackedEvents([...h.events].reverse());
+          for (const ev of [...h.events].reverse()) {
+            const hydrated = rehydrateVertebrae(ev);
+            if (hydrated) {
+              setVertebrae(hydrated);
+              if (typeof ev.overall_rigidity === 'number') {
+                setOverallRigidity(ev.overall_rigidity);
+              }
+              break;
+            }
+          }
+        }
+      })
+      .catch(() => {});
+
+    // Fetch initial event history from persistent disk logs
     fetch('http://localhost:8080/api/spine/logs')
       .then((res) => res.json())
       .then((data) => {
         if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
           setTrackedEvents(data.events);
-          const latest = data.events.find(
-            (e: TrackedEvent) => e.vertebrae && Array.isArray(e.vertebrae) && e.vertebrae.length > 0
-          );
-          if (latest?.vertebrae) {
-            setVertebrae(latest.vertebrae);
-          }
-        } else {
-          fetch('http://localhost:8080/api/spine/history')
-            .then((r) => r.json())
-            .then((h) => {
-              if (h?.events && Array.isArray(h.events)) {
-                setTrackedEvents(h.events.reverse());
+          for (const ev of data.events) {
+            const hydrated = rehydrateVertebrae(ev);
+            if (hydrated) {
+              setVertebrae(hydrated);
+              if (typeof ev.overall_rigidity === 'number') {
+                setOverallRigidity(ev.overall_rigidity);
               }
-            })
-            .catch(() => {});
+              break;
+            }
+          }
         }
       })
-      .catch(() => {
-        fetch('http://localhost:8080/api/spine/history')
-          .then((r) => r.json())
-          .then((h) => {
-            if (h?.events && Array.isArray(h.events)) {
-              setTrackedEvents(h.events.reverse());
-            }
-          })
-          .catch(() => {});
-      });
+      .catch(() => {});
 
     // Listen to real-time events triggered from IDE MCP calls
     const eventSource = new EventSource('http://localhost:8080/api/spine/events');
@@ -345,6 +408,8 @@ export function App() {
 
   const handleRealityChange = (lvl: RealityLevel) => {
     setRealityLevel(lvl);
+    const rig = lvl === 1 ? 0.25 : lvl === 2 ? 0.65 : lvl === 3 ? 0.88 : 0.99;
+    setOverallRigidity(rig);
     setVertebrae((prev) =>
       prev.map((v) => {
         if (v.section === 'coccygeal') {
@@ -356,7 +421,6 @@ export function App() {
           };
         }
         if (v.id === 'S1') {
-          const rig = lvl === 1 ? 0.25 : lvl === 2 ? 0.65 : lvl === 3 ? 0.88 : 0.99;
           return {
             ...v,
             score: rig,
@@ -366,10 +430,16 @@ export function App() {
         return v;
       })
     );
+    // Synchronize dial setting to Gateway & MCP state (SPINE-15)
+    fetch('http://localhost:8080/api/spine/dial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: lvl }),
+    }).catch(() => {});
   };
 
   const activeCount = vertebrae.filter((v) => v.active).length;
-  const currentRigidity = vertebrae.find((v) => v.id === 'S1')?.score ?? 0.99;
+  const currentRigidity = overallRigidity ?? vertebrae.find((v) => v.id === 'S1')?.score ?? 0.99;
 
   const handleSend = async (textToSend?: string) => {
     const prompt = (textToSend || input).trim();
@@ -412,6 +482,9 @@ export function App() {
           if (auditData?.vertebrae) {
             setVertebrae(auditData.vertebrae);
           }
+          if (typeof auditData?.overall_rigidity === 'number') {
+            setOverallRigidity(auditData.overall_rigidity);
+          }
         })
         .catch(() => {});
     } catch {
@@ -440,24 +513,34 @@ export function App() {
       const decoder = new TextDecoder();
       let streamedContent = '';
       let firstTokenReceived = false;
+      // Cross-chunk SSE line buffer so JSON frames split across network reads are never dropped (SPINE-14)
+      let sseBuffer = '';
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            sseBuffer += decoder.decode();
+          } else {
+            sseBuffer += decoder.decode(value, { stream: true });
+          }
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+          const lines = sseBuffer.split('\n');
+          sseBuffer = done ? '' : (lines.pop() ?? '');
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const dataStr = line.slice(6).trim();
-              if (dataStr === '[DONE]') continue;
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (line.startsWith('data:')) {
+              const dataStr = line.slice(5).trim();
+              if (!dataStr || dataStr === '[DONE]') continue;
 
               try {
                 const parsed = JSON.parse(dataStr);
                 if (parsed.vertebrae && Array.isArray(parsed.vertebrae)) {
                   setVertebrae(parsed.vertebrae);
+                  if (typeof parsed.overall_rigidity === 'number') {
+                    setOverallRigidity(parsed.overall_rigidity);
+                  }
                   continue;
                 }
 
@@ -478,10 +561,12 @@ export function App() {
                   });
                 }
               } catch {
-                // partial chunk
+                // ignore malformed frame
               }
             }
           }
+
+          if (done) break;
         }
       }
     } catch (err: unknown) {
@@ -618,7 +703,9 @@ export function App() {
                   <div
                     key={evt.id || idx}
                     onClick={() => {
-                      if (evt.vertebrae) setVertebrae(evt.vertebrae);
+                      const hydrated = rehydrateVertebrae(evt);
+                      if (hydrated) setVertebrae(hydrated);
+                      if (typeof evt.overall_rigidity === 'number') setOverallRigidity(evt.overall_rigidity);
                     }}
                     className="p-3.5 bg-[#0f1118] border border-zinc-800 hover:border-red-500/60 rounded-xl transition cursor-pointer shadow-lg space-y-2"
                   >

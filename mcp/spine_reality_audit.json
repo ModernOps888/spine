@@ -13,6 +13,11 @@
         "description": "Reality level (1: Diplomatic, 2: Objective, 3: Rigorous, 4: Brutal Reality)",
         "enum": [1, 2, 3, 4],
         "default": 4
+      },
+      "verbose": {
+        "type": "boolean",
+        "description": "Include full directive breakdown in audit summary",
+        "default": false
       }
     },
     "required": ["prompt"]

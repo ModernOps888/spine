@@ -1272,6 +1272,7 @@ dependencies = [
 name = "spine-gateway"
 version = "1.2.0"
 dependencies = [
+ "aho-corasick",
  "async-stream",
  "axum",
  "bytes",

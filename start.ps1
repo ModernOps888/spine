@@ -23,6 +23,10 @@ if (-not (Test-Path $binDir)) {
 }
 
 # Resolve the best available binary (release prioritized) with Windows atomic hot-swap
+$staleGatewayBin = Join-Path $binDir "spine-gateway.exe"
+if (Test-Path $staleGatewayBin) {
+    Remove-Item $staleGatewayBin -Force -ErrorAction SilentlyContinue
+}
 if (Test-Path $releaseBin) {
     try {
         if (Test-Path $binPath) {
@@ -45,7 +49,7 @@ if (Test-Path $releaseBin) {
     } catch {}
 }
 
-$exeToRun = if (Test-Path $releaseBin) { $releaseBin } elseif (Test-Path $binPath) { $binPath } elseif (Test-Path $debugBin) { $debugBin } else { "spine.exe" }
+$exeToRun = if (Test-Path $binPath) { $binPath } elseif (Test-Path $releaseBin) { $releaseBin } elseif (Test-Path $debugBin) { $debugBin } else { "spine.exe" }
 
 # Ensure .env is available in root
 $backendEnv = Join-Path $baseDir "backend\.env"
@@ -77,7 +81,7 @@ if (-not $port3333) {
     if (-not $Quiet) { Write-Host "[2/2] Launching React 19 / TypeScript HUD on http://localhost:3333 ..." -ForegroundColor Green }
     $frontWindowStyle = if ($Quiet) { "Hidden" } else { "Minimized" }
     $frontDir = Join-Path $baseDir "frontend"
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", "Set-Location '$frontDir'; npm run dev -- --host --port 3333" -WindowStyle $frontWindowStyle
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", "Set-Location '$frontDir'; npm run dev -- --host 127.0.0.1 --port 3333" -WindowStyle $frontWindowStyle
     Start-Sleep -Seconds 2
 } else {
     if (-not $Quiet) { Write-Host "[2/2] React 19 / TypeScript HUD already active on http://localhost:3333" -ForegroundColor Green }

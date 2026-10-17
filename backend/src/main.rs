@@ -36,6 +36,16 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub tx: broadcast::Sender<serde_json::Value>,
     pub recent_events: Arc<tokio::sync::RwLock<Vec<serde_json::Value>>>,
+    pub active_reality_level: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl AppState {
+    pub fn resolve_level(&self, explicit: Option<u8>) -> RealityLevel {
+        let raw = explicit
+            .unwrap_or_else(|| self.active_reality_level.load(std::sync::atomic::Ordering::Relaxed))
+            .clamp(1, 4);
+        RealityLevel::from_u8(raw)
+    }
 }
 
 /// Maps UI/canonical 2026 model aliases to exact OpenRouter upstream model slugs.
@@ -86,11 +96,13 @@ fn build_app_router(state: Arc<AppState>) -> Router {
         .route("/v1/completions", post(completions_handler))
         .route("/api/spine/audit", post(audit_spine_handler))
         .route("/api/spine/notify", post(notify_spine_handler))
+        .route("/api/spine/dial", post(set_dial_spine_handler))
         .route("/api/spine/events", get(events_spine_handler))
         .route("/api/spine/history", get(history_spine_handler))
         .route("/api/spine/logs", get(logs_spine_handler))
         .route("/api/spine/redteam", post(redteam_spine_handler))
         .route("/api/spine/attest", post(attest_spine_handler))
+        .route("/api/spine/verify-attestation", post(verify_attestation_spine_handler))
         .layer(cors)
         .layer(axum::middleware::from_fn(loopback_host_guard))
         .with_state(state)
@@ -129,6 +141,7 @@ async fn main() {
             .unwrap(),
         tx,
         recent_events: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        active_reality_level: Arc::new(std::sync::atomic::AtomicU8::new(4)),
     });
 
     let app = build_app_router(state);
@@ -347,11 +360,12 @@ async fn audit_spine_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AuditRequest>,
 ) -> impl IntoResponse {
-    let reality_level = RealityLevel::from_u8(payload.reality_level.unwrap_or(4));
+    let reality_level = state.resolve_level(payload.reality_level);
     let model = payload.model.unwrap_or_else(|| "google/gemini-4-argon".to_string());
     
     let (vertebrae, _prompt) = SpineAuditEngine::audit_input(&payload.messages, reality_level, &model);
     let active_count = vertebrae.iter().filter(|v| v.active).count();
+    let overall_rigidity = SpineAuditEngine::compute_backbone_rigidity(reality_level, &vertebrae);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -368,6 +382,7 @@ async fn audit_spine_handler(
         "prompt": prompt_text,
         "vertebrae": vertebrae,
         "active_vertebrae_count": active_count,
+        "overall_rigidity": overall_rigidity,
         "total_vertebrae": 33,
         "reality_level": reality_level as u8,
         "model": model,
@@ -391,6 +406,7 @@ async fn audit_spine_handler(
 }
 
 static EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const LOG_KEEP_FILES: usize = 3;
 const LOG_PROMPT_MAX_CHARS: usize = 1000;
@@ -428,23 +444,60 @@ fn rotate_telemetry_log(log_dir: &std::path::Path) {
 }
 
 pub fn append_to_telemetry_log(event: &serde_json::Value) {
+    let _guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let log_dir = telemetry_log_dir();
     if !log_dir.exists() {
         let _ = std::fs::create_dir_all(&log_dir);
     }
     rotate_telemetry_log(&log_dir);
-    // Truncate the stored prompt: logs are local-only, but unbounded prompts bloat the file.
-    let mut event = event.clone();
-    if let Some(p) = event.get("prompt").and_then(|p| p.as_str()) {
-        if p.chars().count() > LOG_PROMPT_MAX_CHARS {
-            let cut: String = p.chars().take(LOG_PROMPT_MAX_CHARS).collect();
-            event["prompt"] = json!(format!("{}…[truncated]", cut));
+    // Compact disk serialization: replace 33-element vertebrae description array with active_vertebra_ids
+    // and round f32 telemetry metrics to 4 decimal places.
+    let mut disk_event = event.clone();
+    if let Some(obj) = disk_event.as_object_mut() {
+        if let Some(verts) = obj.remove("vertebrae") {
+            if let Some(arr) = verts.as_array() {
+                let active_ids: Vec<String> = arr
+                    .iter()
+                    .filter(|v| v.get("active").and_then(|a| a.as_bool()).unwrap_or(false))
+                    .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+                    .collect();
+                obj.insert("active_vertebra_ids".to_string(), json!(active_ids));
+            }
+        }
+        for float_key in &["overall_rigidity", "rigidity_index"] {
+            if let Some(val) = obj.get(*float_key).and_then(|v| v.as_f64()) {
+                let rounded = (val * 10000.0).round() / 10000.0;
+                obj.insert((*float_key).to_string(), json!(rounded));
+            }
+        }
+        if let Some(p) = obj.get("prompt").and_then(|p| p.as_str()) {
+            if p.chars().count() > LOG_PROMPT_MAX_CHARS {
+                let cut: String = p.chars().take(LOG_PROMPT_MAX_CHARS).collect();
+                obj.insert("prompt".to_string(), json!(format!("{}…[truncated]", cut)));
+            }
         }
     }
     let log_file = log_dir.join("telemetry.jsonl");
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_file) {
         use std::io::Write;
-        if let Ok(json_str) = serde_json::to_string(&event) {
+        if let Ok(json_str) = serde_json::to_string(&disk_event) {
+            let _ = writeln!(file, "{}", json_str);
+        }
+    }
+}
+
+/// Appends a verified `(prompt, chosen, rejected)` preference pair to `post_training_pairs.jsonl`
+/// whenever SPINE strips sycophantic cushions or unearned apologies from an assistant response.
+pub fn append_post_training_pair(pair: &serde_json::Value) {
+    let _guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let log_dir = telemetry_log_dir();
+    if !log_dir.exists() {
+        let _ = std::fs::create_dir_all(&log_dir);
+    }
+    let pair_file = log_dir.join("post_training_pairs.jsonl");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(pair_file) {
+        use std::io::Write;
+        if let Ok(json_str) = serde_json::to_string(pair) {
             let _ = writeln!(file, "{}", json_str);
         }
     }
@@ -458,6 +511,12 @@ async fn notify_spine_handler(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+
+    if payload.get("tool").and_then(|t| t.as_str()) == Some("spine_set_reality_dial") {
+        let lvl = mcp::resolve_reality_level(payload.get("reality_level").or_else(|| payload.get("level")));
+        state.active_reality_level.store(lvl, std::sync::atomic::Ordering::Relaxed);
+        mcp::ACTIVE_REALITY_LEVEL.store(lvl, std::sync::atomic::Ordering::Relaxed);
+    }
 
     if let Some(obj) = payload.as_object_mut() {
         if !obj.contains_key("timestamp") {
@@ -485,13 +544,52 @@ async fn notify_spine_handler(
     Json(json!({ "status": "broadcasted" }))
 }
 
+async fn set_dial_spine_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let lvl = mcp::resolve_reality_level(payload.get("level").or_else(|| payload.get("reality_level")));
+    state.active_reality_level.store(lvl, std::sync::atomic::Ordering::Relaxed);
+    mcp::ACTIVE_REALITY_LEVEL.store(lvl, std::sync::atomic::Ordering::Relaxed);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let dial_evt = json!({
+        "id": next_event_id("evt_dial"),
+        "timestamp": now,
+        "source": "SPINE HUD Reality Dial",
+        "tool": "spine_set_reality_dial",
+        "persisted": true,
+        "reality_level": lvl,
+        "prompt": format!("Reality Horizon set to Level 0{lvl}"),
+    });
+    append_to_telemetry_log(&dial_evt);
+    {
+        let mut history = state.recent_events.write().await;
+        history.push(dial_evt.clone());
+        if history.len() > 50 {
+            history.remove(0);
+        }
+    }
+    let _ = state.tx.send(dial_evt);
+
+    Json(json!({
+        "status": "updated",
+        "reality_level": lvl,
+    }))
+}
+
 async fn history_spine_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let history = state.recent_events.read().await;
+    let active_lvl = state.active_reality_level.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 4);
     Json(json!({
         "events": *history,
-        "count": history.len()
+        "count": history.len(),
+        "active_reality_level": active_lvl,
     }))
 }
 
@@ -561,10 +659,11 @@ async fn chat_completions_handler(
                 .into_response();
         }
     };
-    let reality_level = RealityLevel::from_u8(req.reality_level.unwrap_or(4));
-    
+    let reality_level = state.resolve_level(req.reality_level);
+
     let (vertebrae, directive) = SpineAuditEngine::audit_input(&req.messages, reality_level, &req.model);
     let active_vertebrae_count = vertebrae.iter().filter(|v| v.active).count();
+    let overall_rigidity = SpineAuditEngine::compute_backbone_rigidity(reality_level, &vertebrae);
 
     let prompt_text = req.messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
     let prior_claim = req.messages.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone()).unwrap_or_default();
@@ -582,45 +681,46 @@ async fn chat_completions_handler(
                 .collect()
         });
 
+    // Prompt Cache Prefix Preservation (SPINE-08):
+    // Keep any caller-supplied leading `role: "system"` messages at index 0 untouched so
+    // upstream KV prompt caching hits on the prefix. Insert turn-specific SPINE and ChronoFact
+    // directives immediately before the final user message.
+    let directive_insert_idx = outbound_messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .unwrap_or(outbound_messages.len());
+
     let pushback = SpineAuditEngine::verify_pushback_grounded(&prompt_text, &prior_claim, reality_level);
-    if pushback.verdict == vertebrae::PushbackVerdict::ConcedeAndCorrect {
+    let combined_directive = match pushback.verdict {
+        vertebrae::PushbackVerdict::ConcedeAndCorrect
+        | vertebrae::PushbackVerdict::ConcedeAndAdapt
+        | vertebrae::PushbackVerdict::ObjectiveMatrix => {
+            if directive.is_empty() {
+                pushback.directive.clone()
+            } else {
+                format!("{}\n\n{}", directive, pushback.directive)
+            }
+        }
+        vertebrae::PushbackVerdict::HoldTheLine
+            if pushback.has_authority_intimidation
+                || pushback.demands_unearned_apology
+                || !pushback.technical_indicators_found.is_empty() =>
+        {
+            if directive.is_empty() {
+                pushback.directive.clone()
+            } else {
+                format!("{}\n\n{}", directive, pushback.directive)
+            }
+        }
+        _ => directive.clone(),
+    };
+
+    if !combined_directive.is_empty() {
         outbound_messages.insert(
-            0,
+            directive_insert_idx,
             json!({
                 "role": "system",
-                "content": pushback.directive,
-            }),
-        );
-    } else if pushback.verdict == vertebrae::PushbackVerdict::ConcedeAndAdapt {
-        outbound_messages.insert(
-            0,
-            json!({
-                "role": "system",
-                "content": format!("{}\n\n{}", directive, pushback.directive),
-            }),
-        );
-    } else if pushback.verdict == vertebrae::PushbackVerdict::ObjectiveMatrix {
-        outbound_messages.insert(
-            0,
-            json!({
-                "role": "system",
-                "content": format!("{}\n\n{}", directive, pushback.directive),
-            }),
-        );
-    } else if pushback.verdict == vertebrae::PushbackVerdict::HoldTheLine && (pushback.has_authority_intimidation || pushback.demands_unearned_apology || !pushback.technical_indicators_found.is_empty()) {
-        outbound_messages.insert(
-            0,
-            json!({
-                "role": "system",
-                "content": format!("{}\n\n{}", directive, pushback.directive),
-            }),
-        );
-    } else if !directive.is_empty() {
-        outbound_messages.insert(
-            0,
-            json!({
-                "role": "system",
-                "content": directive,
+                "content": combined_directive,
             }),
         );
     }
@@ -649,7 +749,7 @@ async fn chat_completions_handler(
 
                         if requires_grounding || risk >= 0.25 || is_outdated {
                             outbound_messages.insert(
-                                0,
+                                directive_insert_idx,
                                 json!({
                                     "role": "system",
                                     "content": cal_block,
@@ -664,7 +764,8 @@ async fn chat_completions_handler(
 
     let is_stream = req.stream.unwrap_or(true);
     let model_id = req.model.clone();
-    let upstream_model_id = normalize_openrouter_model_id(&model_id);
+    let is_ollama = model_id.starts_with("ollama/");
+    let is_harness = model_id.starts_with("harness/") || model_id == "qwen2.5-coder:32b" || model_id == "local/qwen32b";
 
     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let event_obj = json!({
@@ -673,6 +774,7 @@ async fn chat_completions_handler(
         "tool": "spine_execute_grounded_reality",
         "vertebrae": vertebrae,
         "active_vertebrae_count": active_vertebrae_count,
+        "overall_rigidity": overall_rigidity,
         "reality_level": reality_level as u8,
         "model": model_id,
         "prompt": prompt_text,
@@ -693,115 +795,59 @@ async fn chat_completions_handler(
     // Broadcast audit event to HUD
     let _ = state.tx.send(event_obj);
 
-    if model_id.starts_with("ollama/") {
-        let clean_model = model_id.trim_start_matches("ollama/");
-        let ollama_payload = json!({
-            "model": clean_model,
-            "messages": outbound_messages,
-            "stream": is_stream,
-            "options": {
-                "temperature": req.temperature.unwrap_or(0.2)
-            }
-        });
-
-        let resp_res = state
-            .http_client
-            .post("http://localhost:11434/api/chat")
-            .json(&ollama_payload)
-            .send()
-            .await;
-
-        match resp_res {
-            Ok(resp) => {
-                let stream = resp.bytes_stream().map(|item| {
-                    match item {
-                        Ok(bytes) => Ok::<Event, std::io::Error>(Event::default().data(String::from_utf8_lossy(&bytes).to_string())),
-                        Err(e) => Ok::<Event, std::io::Error>(Event::default().data(format!("{{\"error\": \"{}\"}}", e))),
-                    }
-                });
-                return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("Local Ollama unavailable: {}", e) })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    if model_id.starts_with("harness/") || model_id == "qwen2.5-coder:32b" || model_id == "local/qwen32b" {
-        let clean_model = if model_id.starts_with("harness/") {
-            model_id.trim_start_matches("harness/")
+    // Unified Upstream Dispatch (OpenRouter + Local Ollama /v1/chat/completions + Local Harness /v1/chat/completions)
+    // All providers flow through the identical SPINE Phase 1 + ReasoningDemuxer + Phase 2 StreamTailSanitizer pipeline.
+    let (target_url, dispatch_model_id, is_local_provider) = if is_ollama {
+        (
+            "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+            model_id.trim_start_matches("ollama/").to_string(),
+            true,
+        )
+    } else if is_harness {
+        let clean = if model_id.starts_with("harness/") {
+            model_id.trim_start_matches("harness/").to_string()
         } else {
-            &model_id
+            model_id.clone()
         };
-        let mut harness_payload = json!({
-            "model": clean_model,
-            "messages": outbound_messages,
-            "stream": is_stream,
-            "temperature": req.temperature.unwrap_or(0.2),
-        });
-        if let Some(max_tok) = req.max_tokens {
-            harness_payload["max_tokens"] = json!(max_tok);
-        }
-
-        let resp_res = state
-            .http_client
-            .post("http://127.0.0.1:8089/v1/chat/completions")
-            .json(&harness_payload)
-            .send()
-            .await;
-
-        match resp_res {
-            Ok(resp) => {
-                let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
-                if !resp.status().is_success() {
-                    let err_text = resp.text().await.unwrap_or_default();
-                    return (status, Json(json!({ "error": err_text }))).into_response();
-                }
-
-                if is_stream {
-                    let builder = Response::builder()
-                        .status(status)
-                        .header(header::CONTENT_TYPE, "text/event-stream")
-                        .header(header::CACHE_CONTROL, "no-cache")
-                        .header(header::CONNECTION, "keep-alive");
-                    let body = Body::from_stream(resp.bytes_stream());
-                    return builder.body(body).unwrap().into_response();
-                } else {
-                    let json_body: serde_json::Value = resp.json().await.unwrap_or(json!({}));
-                    return (status, Json(json_body)).into_response();
-                }
-            }
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("Harness accelerated model server unavailable on http://127.0.0.1:8089: {}. Start it with C:\\Harness\\launch_qwen32b_coder.bat", e) })),
-                )
-                    .into_response();
-            }
-        }
-    }
+        (
+            "http://127.0.0.1:8089/v1/chat/completions".to_string(),
+            clean,
+            true,
+        )
+    } else {
+        (
+            "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            normalize_openrouter_model_id(&model_id),
+            false,
+        )
+    };
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "Authorization",
-        format!("Bearer {}", state.openrouter_api_key).parse().unwrap(),
-    );
-    headers.insert("Content-Type", "application/json".parse().unwrap());
-    headers.insert("HTTP-Referer", "https://spine-gateway.local".parse().unwrap());
-    headers.insert("X-Title", "SPINE Reality Gateway".parse().unwrap());
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+    if !is_local_provider {
+        let sanitized_key: String = state
+            .openrouter_api_key
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        if let Ok(auth_val) = header::HeaderValue::from_str(&format!("Bearer {}", sanitized_key.trim())) {
+            headers.insert(header::AUTHORIZATION, auth_val);
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid characters in OPENROUTER_API_KEY header" })),
+            )
+                .into_response();
+        }
+        headers.insert("HTTP-Referer", header::HeaderValue::from_static("https://spine-gateway.local"));
+        headers.insert("X-Title", header::HeaderValue::from_static("SPINE Reality Gateway"));
+    }
 
-    // Build upstream payload preserving all extra OpenAI/OpenRouter parameters
-    // (`tools`, `tool_choice`, `modalities`, `reasoning`, `response_format`, etc.)
-    // without imposing an artificial 4096 `max_tokens` ceiling on long/multi-step outputs.
     let mut payload = serde_json::Map::new();
     for (k, v) in &req.extra {
         payload.insert(k.clone(), v.clone());
     }
-    payload.insert("model".to_string(), json!(upstream_model_id));
+    payload.insert("model".to_string(), json!(dispatch_model_id));
     payload.insert("messages".to_string(), json!(outbound_messages));
     payload.insert("stream".to_string(), json!(is_stream));
     payload.insert("temperature".to_string(), json!(req.temperature.unwrap_or(0.2)));
@@ -812,7 +858,7 @@ async fn chat_completions_handler(
 
     let resp_res = state
         .http_client
-        .post("https://openrouter.ai/api/v1/chat/completions")
+        .post(&target_url)
         .headers(headers)
         .json(&payload)
         .send()
@@ -821,39 +867,47 @@ async fn chat_completions_handler(
     let upstream_resp = match resp_res {
         Ok(r) => r,
         Err(e) => {
+            let err_msg = if is_ollama {
+                format!("Local Ollama unavailable on http://127.0.0.1:11434: {}", e)
+            } else if is_harness {
+                format!("Harness accelerated model server unavailable on http://127.0.0.1:8089: {}. Start it with C:\\Harness\\launch_qwen32b_coder.bat", e)
+            } else {
+                format!("Upstream dispatch failure: {}", e)
+            };
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": format!("Upstream dispatch failure: {}", e) })),
+                Json(json!({ "error": err_msg })),
             )
                 .into_response();
         }
     };
 
     if !upstream_resp.status().is_success() {
+        let status = StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let err_text = upstream_resp.text().await.unwrap_or_default();
         return (
-            StatusCode::BAD_GATEWAY,
+            status,
             Json(json!({ "error": format!("Upstream API error: {}", err_text) })),
         )
             .into_response();
     }
+
+    let active_ids_for_dpo: Vec<String> = vertebrae
+        .iter()
+        .filter(|v| v.active)
+        .map(|v| v.id.clone())
+        .collect();
 
     if is_stream {
         let mut byte_stream = upstream_resp.bytes_stream();
         let pushbacks_resisted = vertebrae.iter().filter(|v| v.id == "T4" && v.active).count() as u32;
         let telemetry_snapshot = SpineTelemetrySnapshot {
             vertebrae,
-            overall_rigidity: match reality_level {
-                RealityLevel::Diplomatic => 0.25,
-                RealityLevel::Objective => 0.65,
-                RealityLevel::Rigorous => 0.88,
-                RealityLevel::BrutalReality => 0.99,
-            },
+            overall_rigidity,
             active_vertebrae_count,
             pushbacks_resisted,
             apologies_intercepted: 0,
             ttft_ms: start_time.elapsed().as_millis() as u64,
-            // Not measured at snapshot time (stream has not started); 0.0 = unknown, not a real rate.
             tokens_per_sec: 0.0,
             total_tokens: 0,
         };
@@ -862,6 +916,10 @@ async fn chat_completions_handler(
             .event("spine_telemetry")
             .data(serde_json::to_string(&telemetry_snapshot).unwrap_or_default());
 
+        let dpo_prompt = prompt_text.clone();
+        let dpo_model = model_id.clone();
+        let dpo_lvl = reality_level as u8;
+
         let mapped_stream = async_stream::stream! {
             yield Ok::<Event, std::convert::Infallible>(initial_telemetry);
 
@@ -869,198 +927,256 @@ async fn chat_completions_handler(
             let mut reasoning_demuxer = ReasoningDemuxer::new();
             let mut buffered_chunks: Vec<serde_json::Value> = Vec::new();
             let mut buffered_text = String::new();
-            let mut tail_sanitizer = StreamTailSanitizer::new(64);
+            let mut tail_sanitizer = StreamTailSanitizer::new(128);
             let mut phase1_token_delta: i64 = 0;
-            let mut sse_line_buffer = String::new();
+            // Raw byte buffer across TCP chunks so multi-byte UTF-8 sequences split across packets
+            // are never decoded until a complete newline-delimited SSE frame arrives (SPINE-04).
+            let mut raw_byte_buffer: Vec<u8> = Vec::new();
+            let mut raw_visible_accum = String::new();
+            let mut clean_visible_accum = String::new();
+            let mut phase1_intercepted_any = false;
+            let mut done_emitted = false;
 
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
                     Ok(bytes) => {
-                        sse_line_buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        let complete_part = if let Some(last_nl) = sse_line_buffer.rfind('\n') {
-                            let part = sse_line_buffer[..=last_nl].to_string();
-                            sse_line_buffer.drain(..=last_nl);
-                            part
-                        } else {
-                            continue;
+                        raw_byte_buffer.extend_from_slice(&bytes);
+                        let last_nl_pos = match raw_byte_buffer.iter().rposition(|&b| b == b'\n') {
+                            Some(pos) => pos,
+                            None => continue,
                         };
-                        for line in complete_part.lines() {
-                            if line.starts_with("data: ") {
-                                let data_content = line.trim_start_matches("data: ").trim();
-                                if data_content == "[DONE]" {
-                                    // Flush any remaining prefix in reasoning demuxer
-                                    let final_demux = reasoning_demuxer.flush_final();
-                                    for ch in final_demux {
-                                        match ch {
-                                            DemuxedChunk::Reasoning(thought_part) => {
-                                                let thought_evt = json!({
-                                                    "id": "chatcmpl-spine-thought-tail",
-                                                    "object": "chat.completion.chunk",
-                                                    "choices": [{
-                                                        "delta": { "content": thought_part },
-                                                        "index": 0,
-                                                        "finish_reason": null
-                                                    }]
-                                                });
-                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
-                                            }
-                                            DemuxedChunk::Visible(vis_part) => {
-                                                if filter_active {
-                                                    buffered_text.push_str(&vis_part);
-                                                } else {
-                                                    let drained = tail_sanitizer.push_and_drain(&vis_part);
-                                                    if !drained.is_empty() {
-                                                        let vis_evt = json!({
-                                                            "id": "chatcmpl-spine-vis-tail",
-                                                            "object": "chat.completion.chunk",
-                                                            "choices": [{
-                                                                "delta": { "content": drained },
-                                                                "index": 0,
-                                                                "finish_reason": null
-                                                            }]
-                                                        });
-                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(vis_evt.to_string()));
-                                                    }
+                        let complete_bytes: Vec<u8> = raw_byte_buffer.drain(..=last_nl_pos).collect();
+                        let complete_part = String::from_utf8_lossy(&complete_bytes);
+
+                        for raw_line in complete_part.lines() {
+                            let line = raw_line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let data_content = if let Some(rest) = line.strip_prefix("data:") {
+                                rest.trim()
+                            } else if line.starts_with('{') {
+                                // Support raw NDJSON fallback if a local server omits `data:` prefix
+                                line
+                            } else {
+                                continue;
+                            };
+
+                            if data_content == "[DONE]" {
+                                done_emitted = true;
+                                // Flush any remaining prefix in reasoning demuxer
+                                let final_demux = reasoning_demuxer.flush_final();
+                                for ch in final_demux {
+                                    match ch {
+                                        DemuxedChunk::Reasoning(thought_part) => {
+                                            let thought_evt = json!({
+                                                "id": "chatcmpl-spine-thought-tail",
+                                                "object": "chat.completion.chunk",
+                                                "choices": [{
+                                                    "delta": { "content": thought_part },
+                                                    "index": 0,
+                                                    "finish_reason": null
+                                                }]
+                                            });
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
+                                        }
+                                        DemuxedChunk::Visible(vis_part) => {
+                                            raw_visible_accum.push_str(&vis_part);
+                                            if filter_active {
+                                                buffered_text.push_str(&vis_part);
+                                            } else {
+                                                let drained = tail_sanitizer.push_and_drain(&vis_part);
+                                                if !drained.is_empty() {
+                                                    clean_visible_accum.push_str(&drained);
+                                                    let vis_evt = json!({
+                                                        "id": "chatcmpl-spine-vis-tail",
+                                                        "object": "chat.completion.chunk",
+                                                        "choices": [{
+                                                            "delta": { "content": drained },
+                                                            "index": 0,
+                                                            "finish_reason": null
+                                                        }]
+                                                    });
+                                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(vis_evt.to_string()));
                                                 }
                                             }
                                         }
                                     }
+                                }
 
-                                    // Flush any remaining buffered chunks before completing
-                                    if filter_active && !buffered_chunks.is_empty() {
-                                        let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
-                                        let orig_chars = buffered_text[..safe_idx].chars().count();
-                                        let (sanitized, _intercepted) = strip_initial_cushions(&buffered_text[..safe_idx]);
-                                        let sanitized_chars = sanitized.chars().count();
-                                        if orig_chars > sanitized_chars {
-                                            let diff = orig_chars - sanitized_chars;
-                                            phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
-                                        }
+                                // Flush any remaining buffered text/chunks before completing (SPINE-18)
+                                if filter_active && (!buffered_chunks.is_empty() || !buffered_text.is_empty()) {
+                                    let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
+                                    let orig_chars = buffered_text[..safe_idx].chars().count();
+                                    let (sanitized, intercepted) = strip_initial_cushions(&buffered_text[..safe_idx]);
+                                    if intercepted {
+                                        phase1_intercepted_any = true;
+                                    }
+                                    let sanitized_chars = sanitized.chars().count();
+                                    if orig_chars > sanitized_chars {
+                                        let diff = orig_chars - sanitized_chars;
+                                        phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
+                                    }
 
-                                        let drained = tail_sanitizer.push_and_drain(&sanitized);
+                                    let drained = tail_sanitizer.push_and_drain(&sanitized);
+                                    if !drained.is_empty() {
+                                        clean_visible_accum.push_str(&drained);
                                         if let Some(first) = buffered_chunks.first_mut() {
                                             if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
                                                 *target = serde_json::Value::String(drained);
                                             }
                                             yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
-                                        }
-                                        buffered_chunks.clear();
-                                        buffered_text.clear();
-                                        filter_active = false;
-                                    }
-
-                                    // Flush final remaining lookahead bytes from StreamTailSanitizer
-                                    if let Some(final_tail) = tail_sanitizer.flush_final_chunk() {
-                                        let final_evt = json!({
-                                            "id": "chatcmpl-spine-tail",
-                                            "object": "chat.completion.chunk",
-                                            "choices": [{
-                                                "delta": { "content": final_tail },
-                                                "index": 0,
-                                                "finish_reason": null
-                                            }]
-                                        });
-                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(final_evt.to_string()));
-                                    }
-
-                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
-                                } else if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
-                                    // Dual-Usage Accounting: maintain both client-sanitized completion_tokens
-                                    // and upstream billed completion_tokens to prevent chargeback divergence.
-                                    if let Some(usage) = parsed.get_mut("usage") {
-                                        if let Some(raw_comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-                                            usage["upstream_completion_tokens"] = json!(raw_comp_tok);
-                                            let total_token_delta = phase1_token_delta + tail_sanitizer.estimated_token_delta();
-                                            let adjusted = (raw_comp_tok + total_token_delta).max(0);
-                                            usage["completion_tokens"] = json!(adjusted);
-                                            if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                                                usage["upstream_total_tokens"] = json!(prompt_tok + raw_comp_tok);
-                                                usage["total_tokens"] = json!(prompt_tok + adjusted);
-                                            }
+                                        } else {
+                                            let flush_evt = json!({
+                                                "id": "chatcmpl-spine-phase1-flush",
+                                                "object": "chat.completion.chunk",
+                                                "choices": [{
+                                                    "delta": { "content": drained },
+                                                    "index": 0,
+                                                    "finish_reason": null
+                                                }]
+                                            });
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(flush_evt.to_string()));
                                         }
                                     }
+                                    buffered_chunks.clear();
+                                    buffered_text.clear();
+                                    filter_active = false;
+                                }
 
-                                    // CoT Exemption Boundary 1: Dedicated provider thought channels (reasoning_content / thought / reasoning / thinking)
-                                    let has_reasoning_channel = parsed.pointer("/choices/0/delta/reasoning_content").is_some()
-                                        || parsed.pointer("/choices/0/delta/thought").is_some()
-                                        || parsed.pointer("/choices/0/delta/reasoning").is_some()
-                                        || parsed.pointer("/choices/0/delta/thinking").is_some()
-                                        || parsed.pointer("/delta/thinking").is_some()
-                                        || parsed.get("type").and_then(|t| t.as_str()) == Some("thinking_delta")
-                                        || parsed.pointer("/delta/type").and_then(|t| t.as_str()) == Some("thinking_delta");
+                                // Flush final remaining lookahead bytes from StreamTailSanitizer
+                                if let Some(final_tail) = tail_sanitizer.flush_final_chunk() {
+                                    clean_visible_accum.push_str(&final_tail);
+                                    let final_evt = json!({
+                                        "id": "chatcmpl-spine-tail",
+                                        "object": "chat.completion.chunk",
+                                        "choices": [{
+                                            "delta": { "content": final_tail },
+                                            "index": 0,
+                                            "finish_reason": null
+                                        }]
+                                    });
+                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(final_evt.to_string()));
+                                }
 
-                                    if has_reasoning_channel {
-                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
-                                        continue;
+                                if (phase1_intercepted_any || tail_sanitizer.interceptions_count() > 0)
+                                    && clean_visible_accum.trim() != raw_visible_accum.trim()
+                                {
+                                    append_post_training_pair(&json!({
+                                        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                        "model": dpo_model,
+                                        "reality_level": dpo_lvl,
+                                        "active_vertebra_ids": active_ids_for_dpo,
+                                        "prompt": dpo_prompt,
+                                        "chosen": clean_visible_accum.trim(),
+                                        "rejected": raw_visible_accum.trim(),
+                                    }));
+                                }
+
+                                yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
+                            } else if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(data_content) {
+                                // Dual-Usage Accounting: maintain both client-sanitized completion_tokens
+                                // and upstream billed completion_tokens to prevent chargeback divergence.
+                                if let Some(usage) = parsed.get_mut("usage") {
+                                    if let Some(raw_comp_tok) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                                        usage["upstream_completion_tokens"] = json!(raw_comp_tok);
+                                        let total_token_delta = phase1_token_delta + tail_sanitizer.estimated_token_delta();
+                                        let adjusted = (raw_comp_tok + total_token_delta).max(0);
+                                        usage["completion_tokens"] = json!(adjusted);
+                                        if let Some(prompt_tok) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                                            usage["upstream_total_tokens"] = json!(prompt_tok + raw_comp_tok);
+                                            usage["total_tokens"] = json!(prompt_tok + adjusted);
+                                        }
+                                    }
+                                }
+
+                                // CoT Exemption Boundary 1: Dedicated provider thought channels
+                                let has_reasoning_channel = parsed.pointer("/choices/0/delta/reasoning_content").is_some()
+                                    || parsed.pointer("/choices/0/delta/thought").is_some()
+                                    || parsed.pointer("/choices/0/delta/reasoning").is_some()
+                                    || parsed.pointer("/choices/0/delta/thinking").is_some()
+                                    || parsed.pointer("/delta/thinking").is_some()
+                                    || parsed.get("type").and_then(|t| t.as_str()) == Some("thinking_delta")
+                                    || parsed.pointer("/delta/type").and_then(|t| t.as_str()) == Some("thinking_delta");
+
+                                if has_reasoning_channel {
+                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                    continue;
+                                }
+
+                                // CoT Exemption Boundary 2: 3-State Sliding Window Demuxer for Inline Reasoning Tags
+                                let delta_content_opt = parsed
+                                    .pointer("/choices/0/delta/content")
+                                    .or_else(|| parsed.pointer("/message/content"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                if let Some(ref content) = delta_content_opt {
+                                    let demux_res = reasoning_demuxer.process_delta(content);
+                                    if demux_res.transitioned_to_visible {
+                                        filter_active = true;
                                     }
 
-                                    // CoT Exemption Boundary 2: 3-State Sliding Window Demuxer for Inline Reasoning Tags (<think>...</think>, etc.)
-                                    let delta_content_opt = parsed.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).map(|s| s.to_string());
-                                    if let Some(ref content) = delta_content_opt {
-                                        let demux_res = reasoning_demuxer.process_delta(content);
-                                        if demux_res.transitioned_to_visible {
-                                            // Thought block closed: re-arm Phase 1 filter for beginning of visible answer
-                                            filter_active = true;
-                                        }
-
-                                        for chunk_item in demux_res.chunks {
-                                            match chunk_item {
-                                                DemuxedChunk::Reasoning(thought_part) => {
-                                                    let mut thought_evt = parsed.clone();
-                                                    if let Some(target) = thought_evt.pointer_mut("/choices/0/delta/content") {
-                                                        *target = serde_json::Value::String(thought_part);
-                                                    }
-                                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
+                                    for chunk_item in demux_res.chunks {
+                                        match chunk_item {
+                                            DemuxedChunk::Reasoning(thought_part) => {
+                                                let mut thought_evt = parsed.clone();
+                                                if let Some(target) = thought_evt.pointer_mut("/choices/0/delta/content") {
+                                                    *target = serde_json::Value::String(thought_part);
                                                 }
-                                                DemuxedChunk::Visible(visible_part) => {
-                                                    if !filter_active {
-                                                        // Phase 2: Stream through cross-chunk StreamTailSanitizer lookahead buffer (<1µs)
-                                                        let drained = tail_sanitizer.push_and_drain(&visible_part);
+                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
+                                            }
+                                            DemuxedChunk::Visible(visible_part) => {
+                                                raw_visible_accum.push_str(&visible_part);
+                                                if !filter_active {
+                                                    let drained = tail_sanitizer.push_and_drain(&visible_part);
+                                                    if !drained.is_empty() {
+                                                        clean_visible_accum.push_str(&drained);
+                                                        let mut out_evt = parsed.clone();
+                                                        if let Some(target) = out_evt.pointer_mut("/choices/0/delta/content") {
+                                                            *target = serde_json::Value::String(drained);
+                                                        }
+                                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(out_evt.to_string()));
+                                                    }
+                                                } else {
+                                                    buffered_text.push_str(&visible_part);
+                                                    let chunk_copy = parsed.clone();
+                                                    buffered_chunks.push(chunk_copy);
+
+                                                    if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
+                                                        let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
+                                                        let valid_slice = &buffered_text[..safe_idx];
+                                                        let orig_chars = valid_slice.chars().count();
+                                                        let (sanitized, intercepted) = strip_initial_cushions(valid_slice);
+                                                        if intercepted {
+                                                            phase1_intercepted_any = true;
+                                                        }
+                                                        let sanitized_chars = sanitized.chars().count();
+                                                        if orig_chars > sanitized_chars {
+                                                            let diff = orig_chars - sanitized_chars;
+                                                            phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
+                                                        }
+
+                                                        let drained = tail_sanitizer.push_and_drain(&sanitized);
                                                         if !drained.is_empty() {
-                                                            let mut out_evt = parsed.clone();
-                                                            if let Some(target) = out_evt.pointer_mut("/choices/0/delta/content") {
+                                                            clean_visible_accum.push_str(&drained);
+                                                        }
+                                                        if let Some(first) = buffered_chunks.first_mut() {
+                                                            if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
                                                                 *target = serde_json::Value::String(drained);
                                                             }
-                                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(out_evt.to_string()));
+                                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
                                                         }
-                                                    } else {
-                                                        // Phase 1: Optimistic micro-buffer window (48-64 chars) with UTF-8 boundary safety
-                                                        buffered_text.push_str(&visible_part);
-                                                        let chunk_copy = parsed.clone();
-                                                        buffered_chunks.push(chunk_copy);
 
-                                                        // Flush condition: buffer has enough content (>= 48 chars) or completed first sentence
-                                                        if buffered_text.len() >= 48 || buffered_text.contains('\n') || (buffered_text.contains('.') && buffered_text.len() >= 20) {
-                                                            let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
-                                                            let valid_slice = &buffered_text[..safe_idx];
-                                                            let orig_chars = valid_slice.chars().count();
-                                                            let (sanitized, _intercepted) = strip_initial_cushions(valid_slice);
-                                                            let sanitized_chars = sanitized.chars().count();
-                                                            if orig_chars > sanitized_chars {
-                                                                let diff = orig_chars - sanitized_chars;
-                                                                phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
-                                                            }
-
-                                                            let drained = tail_sanitizer.push_and_drain(&sanitized);
-                                                            if let Some(first) = buffered_chunks.first_mut() {
-                                                                if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
-                                                                    *target = serde_json::Value::String(drained);
-                                                                }
-                                                                yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
-                                                            }
-
-                                                            buffered_chunks.clear();
-                                                            buffered_text.clear();
-                                                            filter_active = false;
-                                                        }
+                                                        buffered_chunks.clear();
+                                                        buffered_text.clear();
+                                                        filter_active = false;
                                                     }
                                                 }
                                             }
                                         }
-                                    } else {
-                                        // Non-content events (role definitions, metadata, usage) pass through immediately
-                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                     }
+                                } else {
+                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                 }
                             }
                         }
@@ -1069,6 +1185,57 @@ async fn chat_completions_handler(
                         yield Ok::<Event, std::convert::Infallible>(Event::default().data(format!("{{\"error\": \"{}\"}}", e)));
                     }
                 }
+            }
+
+            // If upstream closed stream without an explicit `data: [DONE]` frame, flush any remaining state
+            if !done_emitted {
+                if filter_active && !buffered_text.is_empty() {
+                    let (sanitized, intercepted) = strip_initial_cushions(&buffered_text);
+                    if intercepted {
+                        phase1_intercepted_any = true;
+                    }
+                    let drained = tail_sanitizer.push_and_drain(&sanitized);
+                    if !drained.is_empty() {
+                        clean_visible_accum.push_str(&drained);
+                        let flush_evt = json!({
+                            "id": "chatcmpl-spine-eof-flush",
+                            "object": "chat.completion.chunk",
+                            "choices": [{
+                                "delta": { "content": drained },
+                                "index": 0,
+                                "finish_reason": null
+                            }]
+                        });
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(flush_evt.to_string()));
+                    }
+                }
+                if let Some(final_tail) = tail_sanitizer.flush_final_chunk() {
+                    clean_visible_accum.push_str(&final_tail);
+                    let final_evt = json!({
+                        "id": "chatcmpl-spine-tail",
+                        "object": "chat.completion.chunk",
+                        "choices": [{
+                            "delta": { "content": final_tail },
+                            "index": 0,
+                            "finish_reason": "stop"
+                        }]
+                    });
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(final_evt.to_string()));
+                }
+                if (phase1_intercepted_any || tail_sanitizer.interceptions_count() > 0)
+                    && clean_visible_accum.trim() != raw_visible_accum.trim()
+                {
+                    append_post_training_pair(&json!({
+                        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                        "model": dpo_model,
+                        "reality_level": dpo_lvl,
+                        "active_vertebra_ids": active_ids_for_dpo,
+                        "prompt": dpo_prompt,
+                        "chosen": clean_visible_accum.trim(),
+                        "rejected": raw_visible_accum.trim(),
+                    }));
+                }
+                yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
             }
         };
 
@@ -1079,18 +1246,52 @@ async fn chat_completions_handler(
         let mut json_body: serde_json::Value = upstream_resp.json().await.unwrap_or(json!({}));
         let mut apologies_intercepted = 0;
         let mut token_adjustment: i64 = 0;
-        if let Some(content) = json_body.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
-            let orig_len = content.chars().count();
-            let (sanitized, intercepted) = strip_initial_cushions(content);
+        if let Some(raw_content) = json_body
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        {
+            let orig_len = raw_content.chars().count();
+            // Demux inline reasoning blocks (<think>...</think>) so CoT is preserved while visible text is sanitized
+            let mut demuxer = ReasoningDemuxer::new();
+            let mut demux_out = demuxer.process_delta(&raw_content).chunks;
+            demux_out.extend(demuxer.flush_final());
+
+            let mut thought_prefix = String::new();
+            let mut visible_raw = String::new();
+            for ch in demux_out {
+                match ch {
+                    DemuxedChunk::Reasoning(r) => thought_prefix.push_str(&r),
+                    DemuxedChunk::Visible(v) => visible_raw.push_str(&v),
+                }
+            }
+
+            let (sanitized, intercepted) = strip_initial_cushions(&visible_raw);
             let (fully_sanitized, delayed_intercepted) = vertebrae::sanitize_delayed_apology(&sanitized);
             if intercepted || delayed_intercepted {
-                let final_len = fully_sanitized.chars().count();
+                if fully_sanitized.trim() != visible_raw.trim() {
+                    append_post_training_pair(&json!({
+                        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                        "model": model_id,
+                        "reality_level": reality_level as u8,
+                        "active_vertebra_ids": active_ids_for_dpo,
+                        "prompt": prompt_text,
+                        "chosen": fully_sanitized.trim(),
+                        "rejected": visible_raw.trim(),
+                    }));
+                }
+                let final_combined = if thought_prefix.is_empty() {
+                    fully_sanitized
+                } else {
+                    format!("{}{}", thought_prefix, fully_sanitized)
+                };
+                let final_len = final_combined.chars().count();
                 if orig_len > final_len {
                     let diff = orig_len - final_len;
                     token_adjustment = ((diff as f64) / 3.8).round().max(1.0) as i64;
                 }
                 if let Some(target) = json_body.pointer_mut("/choices/0/message/content") {
-                    *target = serde_json::Value::String(fully_sanitized);
+                    *target = serde_json::Value::String(final_combined);
                     apologies_intercepted += 1;
                 }
             }
@@ -1107,18 +1308,29 @@ async fn chat_completions_handler(
             }
         }
         let ttft_ms = start_time.elapsed().as_millis() as u64;
+        let telemetry_obj = json!({
+            "vertebrae": vertebrae,
+            "active_vertebrae_count": active_vertebrae_count,
+            "overall_rigidity": overall_rigidity,
+            "apologies_intercepted": apologies_intercepted,
+            "ttft_ms": ttft_ms,
+            "reality_level": reality_level as u8,
+        });
 
-        Json(json!({
-            "response": json_body,
-            "spine_telemetry": {
-                "vertebrae": vertebrae,
-                "active_vertebrae_count": active_vertebrae_count,
-                "apologies_intercepted": apologies_intercepted,
-                "ttft_ms": ttft_ms,
-                "reality_level": reality_level as u8,
-            }
-        }))
-        .into_response()
+        // Standard OpenAI top-level schema compatibility (`choices`, `id`, `usage` at root)
+        // plus `response` and `spine_telemetry` fields for SPINE HUD/custom clients (SPINE-03).
+        let response_snapshot = json_body.clone();
+        if let Some(obj) = json_body.as_object_mut() {
+            obj.insert("spine_telemetry".to_string(), telemetry_obj);
+            obj.insert("response".to_string(), response_snapshot);
+            Json(json_body).into_response()
+        } else {
+            Json(json!({
+                "response": response_snapshot,
+                "spine_telemetry": telemetry_obj,
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -1133,7 +1345,7 @@ async fn redteam_spine_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RedTeamRequest>,
 ) -> impl IntoResponse {
-    let reality_level = RealityLevel::from_u8(payload.reality_level.unwrap_or(4));
+    let reality_level = state.resolve_level(payload.reality_level);
     let target = payload.target_name.unwrap_or_else(|| "Architecture Proposal".to_string());
     let report = AdversarialAuditEngine::audit_proposal(&target, &payload.proposal, reality_level);
 
@@ -1145,8 +1357,10 @@ async fn redteam_spine_handler(
         "verdict": report.verdict,
         "rigidity_index": report.rigidity_index,
         "violations_count": report.violations.len(),
+        "reality_level": reality_level as u8,
         "timestamp": now_ts,
     });
+    append_to_telemetry_log(&event_obj);
     let _ = state.tx.send(event_obj);
 
     Json(json!({
@@ -1166,7 +1380,7 @@ async fn attest_spine_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AttestRequest>,
 ) -> impl IntoResponse {
-    let reality_level = RealityLevel::from_u8(payload.reality_level.unwrap_or(4));
+    let reality_level = state.resolve_level(payload.reality_level);
     let target = payload.target_name.unwrap_or_else(|| "Enterprise System".to_string());
     let report = AdversarialAuditEngine::audit_proposal(&target, &payload.proposal, reality_level);
     let attestation = AdversarialAuditEngine::generate_gate_attestation(&report, &payload.proposal);
@@ -1179,13 +1393,42 @@ async fn attest_spine_handler(
         "attestation_id": attestation.attestation_id,
         "verdict": attestation.verdict,
         "rigidity_index": attestation.rigidity_index,
+        "reality_level": reality_level as u8,
         "timestamp": now_ts,
     });
+    append_to_telemetry_log(&event_obj);
     let _ = state.tx.send(event_obj);
 
     Json(json!({
         "status": "success",
         "attestation": attestation,
         "report": report,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct VerifyAttestationRequest {
+    pub attestation: vertebrae::SpineGateAttestation,
+    pub secret_key: Option<String>,
+}
+
+async fn verify_attestation_spine_handler(
+    Json(payload): Json<VerifyAttestationRequest>,
+) -> impl IntoResponse {
+    let key_override = payload.secret_key.as_deref();
+    let valid = if key_override.is_some() {
+        AdversarialAuditEngine::verify_gate_attestation(&payload.attestation, key_override)
+    } else {
+        let env_key = std::env::var("SPINE_ATTESTATION_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or_else(|| "spine-local-dev-attestation-key-2026".to_string());
+        AdversarialAuditEngine::verify_gate_attestation(&payload.attestation, Some(&env_key))
+    };
+    Json(json!({
+        "status": "success",
+        "valid": valid,
+        "attestation_id": payload.attestation.attestation_id,
+        "verdict": payload.attestation.verdict,
     }))
 }

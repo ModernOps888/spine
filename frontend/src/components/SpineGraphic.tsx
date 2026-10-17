@@ -51,7 +51,10 @@ export const SpineGraphic: React.FC<SpineGraphicProps> = ({
   activeCount,
   rigidity,
 }) => {
-  const [selectedVertebra, setSelectedVertebra] = useState<VertebraStatus | null>(null);
+  const [selectedVertebraId, setSelectedVertebraId] = useState<string | null>(null);
+  const selectedVertebra = selectedVertebraId
+    ? vertebrae.find((v) => v.id === selectedVertebraId) ?? null
+    : null;
 
   // Group vertebrae by anatomical section
   const sections: { key: keyof typeof sectionConfig; items: VertebraStatus[] }[] = [
@@ -131,11 +134,11 @@ export const SpineGraphic: React.FC<SpineGraphicProps> = ({
               <div className="relative pl-3 space-y-1.5 border-l border-zinc-800 ml-2">
                 {section.items.map((vert) => {
                   const isActive = vert.active;
-                  const isSelected = selectedVertebra?.id === vert.id;
+                  const isSelected = selectedVertebraId === vert.id;
                   return (
                     <button
                       key={vert.id}
-                      onClick={() => setSelectedVertebra(vert)}
+                      onClick={() => setSelectedVertebraId(vert.id)}
                       className={`w-full text-left flex items-center justify-between px-2.5 py-1.5 rounded-md border text-xs font-mono transition-all duration-200 ${
                         isSelected
                           ? 'border-white bg-zinc-800 text-white shadow-lg'

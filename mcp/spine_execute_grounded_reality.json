@@ -1,6 +1,6 @@
 {
   "name": "spine_execute_grounded_reality",
-  "description": "Executes a query directly against active 2026 models (e.g. Gemini 3.8 Flash, Claude Opus 5.5, Grok 4.7) with Level 4 Brutal Reality invariants, anti-apology filters, and live telemetry synchronization to the SPINE HUD (http://localhost:3333).",
+  "description": "Executes a query directly against active 2026 models (e.g. Gemini 4 Argon, Astra 6, Claude Opus 5.5, Grok 4.7) with Level 4 Brutal Reality invariants, anti-apology filters, and live telemetry synchronization to the SPINE HUD (http://localhost:3333).",
   "parameters": {
     "type": "object",
     "properties": {
@@ -10,8 +10,8 @@
       },
       "model": {
         "type": "string",
-        "description": "Active 2026 model ID (default: google/gemini-3.8-flash)",
-        "default": "google/gemini-3.8-flash"
+        "description": "Active 2026 model ID (default: google/gemini-4-argon)",
+        "default": "google/gemini-4-argon"
       },
       "reality_level": {
         "type": "integer",

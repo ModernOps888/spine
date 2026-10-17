@@ -4,6 +4,22 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::vertebrae::{RealityLevel, SpineAuditEngine};
 use crate::types::ChatMessage;
 
+pub static ACTIVE_REALITY_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
+
+/// Safely resolves a reality level parameter (1..=4) without u64->u8 cast truncation,
+/// falling back to the active session Reality Horizon set via `spine_set_reality_dial`.
+pub fn resolve_reality_level(arg: Option<&Value>) -> u8 {
+    if let Some(v) = arg {
+        if let Some(i) = v.as_i64() {
+            return i.clamp(1, 4) as u8;
+        }
+        if let Some(u) = v.as_u64() {
+            return u.clamp(1, 4) as u8;
+        }
+    }
+    ACTIVE_REALITY_LEVEL.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 4)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -241,7 +257,7 @@ async fn handle_rpc(
                         .or_else(|| arguments.get("content"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let lvl = resolve_reality_level(arguments.get("reality_level"));
                     let verbose = arguments.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
                     let reality_level = RealityLevel::from_u8(lvl);
 
@@ -254,6 +270,7 @@ async fn handle_rpc(
                     let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, "google/gemini-4-argon");
                     let active_vertebrae: Vec<_> = vertebrae.iter().filter(|v| !v.id.is_empty() && v.active).map(|v| v.id.clone()).collect();
                     let active_count = active_vertebrae.len();
+                    let overall_rigidity = SpineAuditEngine::compute_backbone_rigidity(reality_level, &vertebrae);
 
                     let flattery_detected = vertebrae.iter().any(|v| v.id == "C4" && v.active);
                     let authority_detected = vertebrae.iter().any(|v| v.id == "C6" && v.active);
@@ -268,6 +285,7 @@ async fn handle_rpc(
                         "tool": "spine_reality_audit",
                         "vertebrae": vertebrae,
                         "active_vertebrae_count": active_count,
+                        "overall_rigidity": overall_rigidity,
                         "prompt": prompt,
                         "persisted": true,
                         "reality_level": lvl,
@@ -285,12 +303,7 @@ async fn handle_rpc(
                         .send()
                         .await;
 
-                    let rigidity = match lvl {
-                        1 => 25.0_f32,
-                        2 => 65.0,
-                        3 => 88.0,
-                        _ => 99.0,
-                    };
+                    let rigidity = overall_rigidity * 100.0;
 
                     let any_trap = ego_detected || flattery_detected || authority_detected || pushback_detected;
                     let summary = if !any_trap {
@@ -347,7 +360,7 @@ async fn handle_rpc(
                         .or_else(|| arguments.get("claim"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let lvl = resolve_reality_level(arguments.get("reality_level"));
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let analysis = SpineAuditEngine::verify_pushback_grounded(challenge, prior_claim, reality_level);
@@ -405,18 +418,35 @@ async fn handle_rpc(
                         .or_else(|| arguments.get("prompt"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let lvl = resolve_reality_level(arguments.get("reality_level"));
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
 
+                    let violations_detail = if report.violations.is_empty() {
+                        "• Violations: None (All architectural and security invariants held)".to_string()
+                    } else {
+                        let items: Vec<String> = report
+                            .violations
+                            .iter()
+                            .map(|v| format!("  - [{} | {} | {}] {}\n    ↳ Counter-Probe: {}", v.vertebra_id, v.vertebra_name, v.severity, v.finding, v.counter_probe))
+                            .collect();
+                        format!("• Violations ({}):\n{}", report.violations.len(), items.join("\n"))
+                    };
+                    let scenarios_detail = if report.stress_scenarios.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n• Stress Scenarios:\n  - {}", report.stress_scenarios.join("\n  - "))
+                    };
                     let summary = format!(
-                        "⚡ [SPINE ADVERSARIAL RED-TEAM: {} | Target: {} | Rigidity: {:.1}% | Violations: {} | Stress Scenarios: {}]",
+                        "⚡ [SPINE ADVERSARIAL RED-TEAM: {} | Target: {} | Rigidity: {:.1}% | Violations: {} | Stress Scenarios: {}]\n{}{}",
                         report.verdict,
                         report.target,
                         report.rigidity_index * 100.0,
                         report.violations.len(),
-                        report.stress_scenarios.len()
+                        report.stress_scenarios.len(),
+                        violations_detail,
+                        scenarios_detail
                     );
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -460,7 +490,7 @@ async fn handle_rpc(
                         .or_else(|| arguments.get("prompt"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let lvl = resolve_reality_level(arguments.get("reality_level"));
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let report = crate::vertebrae::AdversarialAuditEngine::audit_proposal(target_name, proposal, reality_level);
@@ -500,17 +530,54 @@ async fn handle_rpc(
                     })))
                 }
                 "spine_get_hud_telemetry" => {
+                    let active_lvl = ACTIVE_REALITY_LEVEL.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 4);
                     let mut hud_data = json!({
                         "system": "SPINE 33-Vertebrae Core",
                         "status": "online",
+                        "active_reality_level": active_lvl,
                         "hud_url": "http://localhost:3333",
-                        "gateway_url": gateway_base
+                        "gateway_url": gateway_base,
+                        "total_events_tracked": 0,
+                        "pushbacks_resisted": 0,
+                        "latest_event_summary": Value::Null,
                     });
 
                     if let Ok(res) = client.get(format!("{}/api/spine/history", gateway_base)).timeout(std::time::Duration::from_millis(600)).send().await {
                         if let Ok(hist) = res.json::<serde_json::Value>().await {
-                            hud_data["recent_events"] = hist["events"].clone();
-                            hud_data["total_events_tracked"] = hist["count"].clone();
+                            if let Some(gw_lvl) = hist.get("active_reality_level").and_then(|v| v.as_u64()) {
+                                let clamped = gw_lvl.clamp(1, 4) as u8;
+                                ACTIVE_REALITY_LEVEL.store(clamped, std::sync::atomic::Ordering::Relaxed);
+                                hud_data["active_reality_level"] = json!(clamped);
+                            }
+                            hud_data["total_events_tracked"] = hist.get("count").cloned().unwrap_or(json!(0));
+                            if let Some(events_arr) = hist.get("events").and_then(|e| e.as_array()) {
+                                let pushbacks = events_arr
+                                    .iter()
+                                    .filter(|e| e.get("pushback_detected").and_then(|b| b.as_bool()).unwrap_or(false))
+                                    .count();
+                                hud_data["pushbacks_resisted"] = json!(pushbacks);
+                                if let Some(last_ev) = events_arr.last() {
+                                    let active_ids: Vec<String> = if let Some(ids) = last_ev.get("active_vertebra_ids").and_then(|v| v.as_array()) {
+                                        ids.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                                    } else if let Some(verts) = last_ev.get("vertebrae").and_then(|v| v.as_array()) {
+                                        verts
+                                            .iter()
+                                            .filter(|v| v.get("active").and_then(|a| a.as_bool()).unwrap_or(false))
+                                            .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    hud_data["latest_event_summary"] = json!({
+                                        "timestamp": last_ev.get("timestamp"),
+                                        "tool": last_ev.get("tool").or_else(|| last_ev.get("source")),
+                                        "reality_level": last_ev.get("reality_level").unwrap_or(&json!(active_lvl)),
+                                        "overall_rigidity": last_ev.get("overall_rigidity").or_else(|| last_ev.get("rigidity_index")),
+                                        "active_vertebrae_count": last_ev.get("active_vertebrae_count").unwrap_or(&json!(active_ids.len())),
+                                        "active_ids": active_ids,
+                                    });
+                                }
+                            }
                         }
                     }
 
@@ -520,7 +587,8 @@ async fn handle_rpc(
                     })))
                 }
                 "spine_set_reality_dial" => {
-                    let lvl = (arguments.get("level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let lvl = resolve_reality_level(arguments.get("level"));
+                    ACTIVE_REALITY_LEVEL.store(lvl, std::sync::atomic::Ordering::Relaxed);
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                     let dial_payload = json!({
                         "id": crate::next_event_id("evt_dial"),
@@ -548,7 +616,7 @@ async fn handle_rpc(
                 "spine_execute_grounded_reality" => {
                     let prompt = arguments.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                     let model = arguments.get("model").and_then(|v| v.as_str()).unwrap_or("google/gemini-4-argon");
-                    let lvl = (arguments.get("reality_level").and_then(|v| v.as_u64()).unwrap_or(4) as u8).clamp(1, 4);
+                    let lvl = resolve_reality_level(arguments.get("reality_level"));
                     let reality_level = RealityLevel::from_u8(lvl);
 
                     let mut msgs = vec![ChatMessage {
@@ -559,6 +627,7 @@ async fn handle_rpc(
 
                     let (vertebrae, directive) = SpineAuditEngine::audit_input(&msgs, reality_level, model);
                     let active_count = vertebrae.iter().filter(|v| v.active).count();
+                    let overall_rigidity = SpineAuditEngine::compute_backbone_rigidity(reality_level, &vertebrae);
 
                     if !directive.is_empty() {
                         msgs.insert(0, ChatMessage {
@@ -628,9 +697,26 @@ async fn handle_rpc(
                                             .and_then(|t| t.get("content"))
                                             .and_then(|s| s.as_str())
                                         {
-                                            let (stripped, _) = crate::vertebrae::strip_initial_cushions(content);
-                                            let (sanitized, _) = crate::vertebrae::sanitize_delayed_apology(&stripped);
-                                            resp_text = sanitized.trim().to_string();
+                                            let (stripped, c1) = crate::vertebrae::strip_initial_cushions(content);
+                                            let (sanitized, c2) = crate::vertebrae::sanitize_delayed_apology(&stripped);
+                                            let clean_text = sanitized.trim().to_string();
+                                            if (c1 || c2) && clean_text != content.trim() {
+                                                let active_ids: Vec<String> = vertebrae
+                                                    .iter()
+                                                    .filter(|v| v.active)
+                                                    .map(|v| v.id.clone())
+                                                    .collect();
+                                                crate::append_post_training_pair(&json!({
+                                                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                                    "model": model,
+                                                    "reality_level": lvl,
+                                                    "active_vertebra_ids": active_ids,
+                                                    "prompt": prompt,
+                                                    "chosen": clean_text,
+                                                    "rejected": content,
+                                                }));
+                                            }
+                                            resp_text = clean_text;
                                         } else {
                                             is_error = true;
                                             resp_text = format!("Upstream response missing choices[0].message.content: {}", body);
@@ -666,6 +752,7 @@ async fn handle_rpc(
                         "tool": "spine_execute_grounded_reality",
                         "vertebrae": vertebrae,
                         "active_vertebrae_count": active_count,
+                        "overall_rigidity": overall_rigidity,
                         "prompt": prompt,
                         "persisted": true,
                         "model": model,
