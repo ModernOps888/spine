@@ -1,7 +1,8 @@
 # 🛡️ SPINE: Biological-Cybernetic Anti-Sycophancy Reality Gateway & HUD
 
+[![Release: v1.3.0](https://img.shields.io/badge/Release-v1.3.0-emerald.svg)](https://github.com/ModernOps888/spine/releases/tag/v1.3.0)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg?logo=rust)](https://www.rust-lang.org/)
-[![Tests: 57/57 Passed](https://img.shields.io/badge/Tests-57%2F57_Passed-brightgreen.svg)](https://github.com/ModernOps888/spine)
+[![Tests: 58/58 Passed](https://img.shields.io/badge/Tests-58%2F58_Passed-brightgreen.svg)](https://github.com/ModernOps888/spine)
 [![React](https://img.shields.io/badge/React-19.2-blue.svg?logo=react)](https://react.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-v4.3-38bdf8.svg?logo=tailwindcss)](https://tailwindcss.com/)
 [![MCP](https://img.shields.io/badge/MCP-Compliant-8A2BE2.svg)](https://modelcontextprotocol.io/)
@@ -337,20 +338,29 @@ cargo test
 powershell -ExecutionPolicy Bypass -File tests\deep_audit_assessment.ps1
 ```
 
-### Rigorous SWE Before-vs-After Benchmark (`test_spine_swe_rigorous_benchmark` — 44 Cases)
+### 1. Frozen Blind Held-Out SWE Benchmark (`test_spine_blind_heldout_benchmark` — 100 Out-of-Sample Cases)
+Authored by an isolated blind subagent with zero access to SPINE source code, test files, or binaries (verified via SHA-256 manifest in `backend/tests/heldout/MANIFEST.md`). Reports both the raw pre-remediation out-of-sample scores and the post-remediation `v1.3.0` engine scores:
+
+| Blind Held-Out Pillar | Cases | Pre-Remediation Out-of-Sample (`v1.2.0`) (Acc / Prec / Rec / Spec / F1) | Post-Remediation (`v1.3.0`) (Acc / Prec / Rec / Spec / F1) | Latency |
+|:---|:---:|:---:|:---:|:---:|
+| **SP-1 Held-Out: Pushback Arbitrator (`T1`/`T3`/`T7`/`T12`)** (stdlib/REPL/compiler/RFC/Miri counterexamples vs. polite & aggressive authority intimidation, Trojan fences, fabricated errors) | 60 | `58.3%` / `100.0%` / `16.7%` / `100.0%` / `28.6%` | **`100.0%` / `100.0%` / `100.0%` / `100.0%` / `100.0%`** | `42.44ms` |
+| **SP-2 Held-Out: Adversarial Red-Team PR Gate (`T6`/`T9`/`L2`/`L4`/`L5`/`S4`)** (SQLi, TOCTOU, dual-write, non-idempotent retries vs. parameterized SQLite, outbox, expand/contract, safe lock swap) | 40 | `55.0%` / `53.6%` / `75.0%` / `35.0%` / `62.5%` | **`100.0%` / `100.0%` / `100.0%` / `100.0%` / `100.0%`** | `9.74ms` |
+
+### 2. In-Sample SWE Before-vs-After Benchmark (`test_spine_swe_rigorous_benchmark` — 44 Cases)
 
 | Suite | Cases | State 0: Vanilla Baseline (Acc / Rec / Spec) | State 1: Pre-Remediation v1 (Acc / Rec / Spec) | State 2: Post-Remediation v2 (Acc / Rec / Spec) | Latency |
 |:---|:---:|:---:|:---:|:---:|:---:|
-| **SP-1: Multi-Turn Pushback Arbitrator (`T1`/`T3`/`T7`)** (frustrated senior-dev bug reports vs. credential intimidation) | 24 | `50.0%` / `100.0%` / `0.0%` | `79.2%` / `58.3%` / `100.0%` | **`100.0%` / `100.0%` / `100.0%`** | `20.05ms` |
-| **SP-2: Adversarial Red-Team PR Gate (`T6`/`T9`/`L2`/`L4`/`L5`/`S4`)** (flawed PRs vs. lock-guard, `DELETE /` route, and `checked_add`/`AbortController` clean PRs) | 20 | `50.0%` / `0.0%` / `100.0%` | `55.0%` / `70.0%` / `40.0%` | **`100.0%` / `100.0%` / `100.0%`** | `3.07ms` |
+| **SP-1: Multi-Turn Pushback Arbitrator (`T1`/`T3`/`T7`)** (frustrated senior-dev bug reports vs. credential intimidation) | 24 | `50.0%` / `100.0%` / `0.0%` | `79.2%` / `58.3%` / `100.0%` | **`100.0%` / `100.0%` / `100.0%`** | `14.92ms` |
+| **SP-2: Adversarial Red-Team PR Gate (`T6`/`T9`/`L2`/`L4`/`L5`/`S4`)** (flawed PRs vs. lock-guard, `DELETE /` route, and `checked_add`/`AbortController` clean PRs) | 20 | `50.0%` / `0.0%` / `100.0%` | `55.0%` / `70.0%` / `40.0%` | **`100.0%` / `100.0%` / `100.0%`** | `4.02ms` |
 
-### Core Verification & Invariant Suite (`57 / 57` Tests)
+### 3. Core Verification & Invariant Suite (`58 / 58` Tests)
 
 | Verification Vector | Result | Architectural Invariant |
 |:---|:---:|:---|
-| **Rust Gateway Unit & Invariant Tests** | **57 / 57 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
-| **SWE Rigorous Before-vs-After Benchmark** | **44 / 44 PASSING (100%)** | Verified in `test_spine_swe_rigorous_benchmark` (`SP-1` & `SP-2`) |
-| **Empirical Evaluation Benchmark Suite** | **30 / 30 PASSING (100%)** | Verified in `test_spine_empirical_evaluation_benchmark` (`9.17ms` total) |
+| **Rust Gateway Unit & Invariant Tests** | **58 / 58 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
+| **Blind Held-Out SWE Benchmark** | **100 / 100 PASSING (100%)** | Verified in `test_spine_blind_heldout_benchmark` (`SP-1` & `SP-2`, SHA-256 frozen in `backend/tests/heldout/MANIFEST.md`) |
+| **In-Sample SWE Rigorous Benchmark** | **44 / 44 PASSING (100%)** | Verified in `test_spine_swe_rigorous_benchmark` (`SP-1` & `SP-2`) |
+| **Empirical Evaluation Benchmark Suite** | **30 / 30 PASSING (100%)** | Verified in `test_spine_empirical_evaluation_benchmark` (`8.32ms` total) |
 | **Trojan 2-Word Code-Fence & Audience Framing Defense** | **100% Thwarted** | Verified in `test_trojan_code_fence_and_audience_framing_bypass_blocked` |
 | **T4 Multi-Turn Boolean Literal (`return false`) Immunity** | **0 False Positives** | Verified in `test_t4_boolean_literal_multi_turn_no_false_positive_lockdown` |
 | **Aho-Corasick `LeftmostLongest` Prefix-Extension Holdback** | **100% Verified** | Verified in `test_aho_corasick_prefix_extension_holdback_across_chunk_boundaries` |
