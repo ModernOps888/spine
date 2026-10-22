@@ -7,9 +7,6 @@
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-v4.3-38bdf8.svg?logo=tailwindcss)](https://tailwindcss.com/)
 [![MCP](https://img.shields.io/badge/MCP-Compliant-8A2BE2.svg)](https://modelcontextprotocol.io/)
 [![ChronoFact-Integrated](https://img.shields.io/badge/ChronoFact-Dual--Grounded-emerald.svg)](https://github.com/ModernOps888/chronofact)
-[![Enterprise-Audits](https://img.shields.io/badge/Enterprise-Security_Audits-ff00e5.svg)](https://infinitytechstack.uk/consulting)
-
-> 🛡️ **Enterprise Production Audits & Systems Advisory**: Deploying autonomous agents or frontier LLMs in production where sycophancy, hallucination drift, or tool boundary bypasses compromise your business? We offer **fixed-scope, 3-day enterprise agent security audits** (£4,500 with runnable remediation PRs included) and **sovereign AI architecture advisory**. [**Explore Packages & Book a Call →**](https://infinitytechstack.uk/consulting)
 
 **SPINE** is a high-performance biological-cybernetic firewall and anti-sycophancy gateway for autonomous AI agents and frontier language models. It enforces epistemic integrity, strips conversational flattery, resists authority and credential intimidation, and intercepts unearned apologies across 33 cybernetic vertebrae.
 
