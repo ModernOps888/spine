@@ -194,8 +194,13 @@ async fn loopback_host_guard(
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .map(|h| {
-            let name = h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h);
-            matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+            let trimmed = h.trim();
+            if trimmed.starts_with("[::1]") {
+                true
+            } else {
+                let name = trimmed.rsplit_once(':').map(|(n, _)| n).unwrap_or(trimmed);
+                matches!(name, "localhost" | "127.0.0.1")
+            }
         })
         .unwrap_or(false);
     if !host_ok {
@@ -354,6 +359,8 @@ pub struct AuditRequest {
     pub messages: Vec<types::ChatMessage>,
     pub reality_level: Option<u8>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 async fn audit_spine_handler(
@@ -372,7 +379,17 @@ async fn audit_spine_handler(
         .unwrap_or_default()
         .as_secs();
 
-    let prompt_text = payload.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let prompt_text = payload
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .or_else(|| payload.messages.last())
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let ego_detected = vertebrae.iter().any(|v| v.id == "C2" && v.active);
+    let flattery_detected = vertebrae.iter().any(|v| v.id == "C4" && v.active);
+    let authority_detected = vertebrae.iter().any(|v| v.id == "C6" && v.active);
     let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
 
     let snapshot = json!({
@@ -386,21 +403,26 @@ async fn audit_spine_handler(
         "total_vertebrae": 33,
         "reality_level": reality_level as u8,
         "model": model,
+        "ego_detected": ego_detected,
+        "flattery_detected": flattery_detected,
+        "authority_detected": authority_detected,
         "pushback_detected": pushback_detected,
     });
 
-    {
-        let mut history = state.recent_events.write().await;
-        history.push(snapshot.clone());
-        if history.len() > 50 {
-            history.remove(0);
+    if !payload.ephemeral {
+        {
+            let mut history = state.recent_events.write().await;
+            history.push(snapshot.clone());
+            if history.len() > 50 {
+                history.remove(0);
+            }
         }
+
+        // Persistent disk logging
+        append_to_telemetry_log(&snapshot);
+
+        let _ = state.tx.send(snapshot.clone());
     }
-
-    // Persistent disk logging
-    append_to_telemetry_log(&snapshot);
-
-    let _ = state.tx.send(snapshot.clone());
 
     Json(snapshot)
 }
@@ -495,6 +517,9 @@ pub fn append_post_training_pair(pair: &serde_json::Value) {
         let _ = std::fs::create_dir_all(&log_dir);
     }
     let pair_file = log_dir.join("post_training_pairs.jsonl");
+    if std::fs::metadata(&pair_file).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
+        let _ = std::fs::rename(&pair_file, log_dir.join("post_training_pairs.1.jsonl"));
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(pair_file) {
         use std::io::Write;
         if let Ok(json_str) = serde_json::to_string(pair) {
@@ -594,9 +619,10 @@ async fn history_spine_handler(
 }
 
 async fn logs_spine_handler() -> impl IntoResponse {
-    const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+    const TAIL_BYTES: u64 = 256 * 1024;
+    const MAX_LOG_EVENTS: usize = 100;
     let log_path = telemetry_log_dir().join("telemetry.jsonl");
-    let mut events = Vec::new();
+    let mut events = Vec::with_capacity(MAX_LOG_EVENTS);
     if let Ok(mut file) = std::fs::File::open(&log_path) {
         use std::io::{Read, Seek, SeekFrom};
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -605,14 +631,31 @@ async fn logs_spine_handler() -> impl IntoResponse {
             let mut buf = Vec::new();
             if file.read_to_end(&mut buf).is_ok() {
                 let text = String::from_utf8_lossy(&buf);
-                let mut lines = text.lines();
-                if start > 0 {
-                    lines.next(); // first line is likely partial
+                let mut lines: Vec<&str> = text.lines().collect();
+                if start > 0 && !lines.is_empty() {
+                    lines.remove(0); // first line is likely partial
                 }
-                for line in lines {
+                for line in lines.into_iter().rev() {
+                    if events.len() >= MAX_LOG_EVENTS {
+                        break;
+                    }
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            if let Some(obj) = val.as_object_mut() {
+                                if let Some(verts) = obj.remove("vertebrae") {
+                                    if !obj.contains_key("active_vertebra_ids") {
+                                        if let Some(arr) = verts.as_array() {
+                                            let active_ids: Vec<String> = arr
+                                                .iter()
+                                                .filter(|v| v.get("active").and_then(|a| a.as_bool()).unwrap_or(false))
+                                                .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+                                                .collect();
+                                            obj.insert("active_vertebra_ids".to_string(), json!(active_ids));
+                                        }
+                                    }
+                                }
+                            }
                             events.push(val);
                         }
                     }
@@ -620,8 +663,6 @@ async fn logs_spine_handler() -> impl IntoResponse {
             }
         }
     }
-    events.reverse();
-    events.truncate(500);
     Json(json!({
         "events": events,
         "count": events.len()
@@ -768,6 +809,10 @@ async fn chat_completions_handler(
     let is_harness = model_id.starts_with("harness/") || model_id == "qwen2.5-coder:32b" || model_id == "local/qwen32b";
 
     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let ego_detected = vertebrae.iter().any(|v| v.id == "C2" && v.active);
+    let flattery_detected = vertebrae.iter().any(|v| v.id == "C4" && v.active);
+    let authority_detected = vertebrae.iter().any(|v| v.id == "C6" && v.active);
+    let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
     let event_obj = json!({
         "id": next_event_id("evt"),
         "source": "SPINE Gateway (/v1/chat/completions)",
@@ -779,6 +824,10 @@ async fn chat_completions_handler(
         "model": model_id,
         "prompt": prompt_text,
         "timestamp": now_ts,
+        "ego_detected": ego_detected,
+        "flattery_detected": flattery_detected,
+        "authority_detected": authority_detected,
+        "pushback_detected": pushback_detected,
     });
 
     {
@@ -1189,6 +1238,44 @@ async fn chat_completions_handler(
 
             // If upstream closed stream without an explicit `data: [DONE]` frame, flush any remaining state
             if !done_emitted {
+                let final_demux = reasoning_demuxer.flush_final();
+                for ch in final_demux {
+                    match ch {
+                        DemuxedChunk::Reasoning(thought_part) => {
+                            let thought_evt = json!({
+                                "id": "chatcmpl-spine-thought-eof",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "delta": { "content": thought_part },
+                                    "index": 0,
+                                    "finish_reason": null
+                                }]
+                            });
+                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_evt.to_string()));
+                        }
+                        DemuxedChunk::Visible(vis_part) => {
+                            raw_visible_accum.push_str(&vis_part);
+                            if filter_active {
+                                buffered_text.push_str(&vis_part);
+                            } else {
+                                let drained = tail_sanitizer.push_and_drain(&vis_part);
+                                if !drained.is_empty() {
+                                    clean_visible_accum.push_str(&drained);
+                                    let vis_evt = json!({
+                                        "id": "chatcmpl-spine-vis-eof",
+                                        "object": "chat.completion.chunk",
+                                        "choices": [{
+                                            "delta": { "content": drained },
+                                            "index": 0,
+                                            "finish_reason": null
+                                        }]
+                                    });
+                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(vis_evt.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
                 if filter_active && !buffered_text.is_empty() {
                     let (sanitized, intercepted) = strip_initial_cushions(&buffered_text);
                     if intercepted {

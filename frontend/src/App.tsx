@@ -66,13 +66,19 @@ const DEFAULT_VERTEBRAE: VertebraStatus[] = [
   { id: 'Co4', section: 'coccygeal', name: 'Level 4: Brutal Reality', active: true, score: 1.0, detail: 'ACTIVE HORIZON: Uncompromising cold truth' },
 ];
 
+function extractRigidity(evt: TrackedEvent): number | undefined {
+  if (typeof evt.overall_rigidity === 'number') return evt.overall_rigidity;
+  if (typeof evt.rigidity_index === 'number') return evt.rigidity_index;
+  return undefined;
+}
+
 function rehydrateVertebrae(evt: TrackedEvent): VertebraStatus[] | null {
   if (evt.vertebrae && Array.isArray(evt.vertebrae) && evt.vertebrae.length > 0) {
     return evt.vertebrae;
   }
   if (evt.active_vertebra_ids && Array.isArray(evt.active_vertebra_ids)) {
     const activeSet = new Set(evt.active_vertebra_ids);
-    const rig = evt.overall_rigidity ?? evt.rigidity_index ?? 0.99;
+    const rig = extractRigidity(evt) ?? 0.99;
     return DEFAULT_VERTEBRAE.map((v) => {
       const isAct = activeSet.has(v.id);
       return {
@@ -201,8 +207,9 @@ export function App() {
           const hydrated = rehydrateVertebrae(ev);
           if (hydrated) {
             setVertebrae(hydrated);
-            if (typeof ev.overall_rigidity === 'number') {
-              setOverallRigidity(ev.overall_rigidity);
+            const rig = extractRigidity(ev);
+            if (rig !== undefined) {
+              setOverallRigidity(rig);
             }
             break;
           }
@@ -297,8 +304,9 @@ export function App() {
           const hydrated = rehydrateVertebrae(d);
           if (hydrated) {
             setVertebrae(hydrated);
-            if (typeof d.overall_rigidity === 'number') {
-              setOverallRigidity(d.overall_rigidity);
+            const rig = extractRigidity(d);
+            if (rig !== undefined) {
+              setOverallRigidity(rig);
             }
             break;
           }
@@ -347,48 +355,54 @@ export function App() {
       })
       .catch(() => {});
 
-    // Sync active reality level and memory history from gateway
-    fetch('http://localhost:8080/api/spine/history')
-      .then((r) => r.json())
-      .then((h) => {
-        if (typeof h?.active_reality_level === 'number' && h.active_reality_level >= 1 && h.active_reality_level <= 4) {
-          setRealityLevel(h.active_reality_level as RealityLevel);
-        }
-        if (h?.events && Array.isArray(h.events) && h.events.length > 0) {
-          setTrackedEvents([...h.events].reverse());
-          for (const ev of [...h.events].reverse()) {
-            const hydrated = rehydrateVertebrae(ev);
-            if (hydrated) {
-              setVertebrae(hydrated);
-              if (typeof ev.overall_rigidity === 'number') {
-                setOverallRigidity(ev.overall_rigidity);
-              }
-              break;
-            }
-          }
-        }
-      })
-      .catch(() => {});
+    // Sync active reality level, in-memory history, and persistent disk logs without race overwrites
+    Promise.allSettled([
+      fetch('http://localhost:8080/api/spine/history').then((r) => r.json()),
+      fetch('http://localhost:8080/api/spine/logs').then((r) => r.json()),
+    ]).then(([histRes, logsRes]) => {
+      const h = histRes.status === 'fulfilled' ? histRes.value : null;
+      const l = logsRes.status === 'fulfilled' ? logsRes.value : null;
 
-    // Fetch initial event history from persistent disk logs
-    fetch('http://localhost:8080/api/spine/logs')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
-          setTrackedEvents(data.events);
-          for (const ev of data.events) {
-            const hydrated = rehydrateVertebrae(ev);
-            if (hydrated) {
-              setVertebrae(hydrated);
-              if (typeof ev.overall_rigidity === 'number') {
-                setOverallRigidity(ev.overall_rigidity);
-              }
-              break;
+      if (typeof h?.active_reality_level === 'number' && h.active_reality_level >= 1 && h.active_reality_level <= 4) {
+        setRealityLevel(h.active_reality_level as RealityLevel);
+      }
+
+      const histEvents: TrackedEvent[] = Array.isArray(h?.events) ? [...h.events].reverse() : [];
+      const diskEvents: TrackedEvent[] = Array.isArray(l?.events) ? l.events : [];
+      const combined = [...histEvents, ...diskEvents];
+
+      if (combined.length > 0) {
+        setTrackedEvents((prev) => {
+          const seen = new Set<string>();
+          const merged: TrackedEvent[] = [];
+          for (const ev of [...prev, ...combined]) {
+            const key = ev.id || `${ev.timestamp ?? ''}_${ev.tool ?? ''}_${ev.prompt ?? ''}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              merged.push(ev);
             }
+            if (merged.length >= 100) break;
+          }
+          const pbCount = merged.filter((d) => d.pushback_detected).length;
+          if (pbCount > 0) {
+            setPushbacksResisted((curr) => Math.max(curr, pbCount));
+          }
+          return merged;
+        });
+
+        for (const ev of combined) {
+          const hydrated = rehydrateVertebrae(ev);
+          if (hydrated) {
+            setVertebrae(hydrated);
+            const rig = extractRigidity(ev);
+            if (rig !== undefined) {
+              setOverallRigidity(rig);
+            }
+            break;
           }
         }
-      })
-      .catch(() => {});
+      }
+    });
 
     // Listen to real-time events triggered from IDE MCP calls
     const eventSource = new EventSource('http://localhost:8080/api/spine/events');
@@ -448,49 +462,15 @@ export function App() {
     setInput('');
     setActiveTab('chat');
 
-    const promptLower = prompt.toLowerCase();
-    const isPushback =
-      promptLower.includes('apologize') ||
-      promptLower.includes('wrong') ||
-      promptLower.includes('admit') ||
-      promptLower.includes('mistake') ||
-      promptLower.includes('years') ||
-      promptLower.includes('principal');
-
-    if (isPushback) {
-      setPushbacksResisted((prev) => prev + 1);
-    }
-
     const newMessages: ChatMessage[] = [...messages, { role: 'user', content: prompt }];
     setMessages(newMessages);
     setIsStreaming(true);
 
     const startTime = performance.now();
 
-    try {
-      fetch('http://localhost:8080/api/spine/audit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: newMessages,
-          reality_level: realityLevel,
-          model: selectedModel,
-        }),
-      })
-        .then((res) => res.json())
-        .then((auditData) => {
-          if (auditData?.vertebrae) {
-            setVertebrae(auditData.vertebrae);
-          }
-          if (typeof auditData?.overall_rigidity === 'number') {
-            setOverallRigidity(auditData.overall_rigidity);
-          }
-        })
-        .catch(() => {});
-    } catch {
-      // ignore
-    }
-
+    // Note: /v1/chat/completions executes SpineAuditEngine::audit_input, logs to telemetry.jsonl,
+    // broadcasts to /api/spine/events (which updates vertebrae, overallRigidity, and pushbacksResisted),
+    // and emits an inline `event: spine_telemetry` frame on the stream.
     setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
 
     try {
@@ -705,7 +685,8 @@ export function App() {
                     onClick={() => {
                       const hydrated = rehydrateVertebrae(evt);
                       if (hydrated) setVertebrae(hydrated);
-                      if (typeof evt.overall_rigidity === 'number') setOverallRigidity(evt.overall_rigidity);
+                      const rig = extractRigidity(evt);
+                      if (rig !== undefined) setOverallRigidity(rig);
                     }}
                     className="p-3.5 bg-[#0f1118] border border-zinc-800 hover:border-red-500/60 rounded-xl transition cursor-pointer shadow-lg space-y-2"
                   >

@@ -28,13 +28,17 @@ if (Test-Path $staleGatewayBin) {
     Remove-Item $staleGatewayBin -Force -ErrorAction SilentlyContinue
 }
 if (Test-Path $releaseBin) {
-    try {
-        if (Test-Path $binPath) {
-            Remove-Item "$binPath.old" -Force -ErrorAction SilentlyContinue
-            Move-Item -Path $binPath -Destination "$binPath.old" -Force -ErrorAction SilentlyContinue
-        }
-        Copy-Item $releaseBin $binPath -Force -ErrorAction SilentlyContinue
-    } catch {}
+    $needsCopy = (-not (Test-Path $binPath)) -or ((Get-FileHash $releaseBin).Hash -ne (Get-FileHash $binPath).Hash)
+    if ($needsCopy) {
+        try {
+            if (Test-Path $binPath) {
+                Get-ChildItem "$binDir\*.old*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                $oldPath = "$binPath.old.$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+                Move-Item -Path $binPath -Destination $oldPath -Force -ErrorAction SilentlyContinue
+            }
+            Copy-Item $releaseBin $binPath -Force -ErrorAction SilentlyContinue
+        } catch {}
+    }
 } elseif (Test-Path $binPath) {
     # Existing bin\spine.exe is ready
 } elseif (Test-Path $debugBin) {

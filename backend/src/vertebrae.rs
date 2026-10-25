@@ -83,11 +83,10 @@ pub(crate) fn contains_word(hay: &str, word: &str) -> bool {
     false
 }
 
-fn tokenize(lower: &str) -> Vec<String> {
+fn tokenize(lower: &str) -> Vec<&str> {
     lower
         .split(|c: char| !(c.is_alphanumeric() || c == '\''))
         .filter(|t| !t.is_empty())
-        .map(|t| t.to_string())
         .collect()
 }
 
@@ -97,6 +96,69 @@ fn is_number_token(t: &str) -> bool {
         "twelve", "fifteen", "twenty", "thirty", "forty", "several", "many",
     ];
     (!t.is_empty() && t.chars().all(|c| c.is_ascii_digit())) || NUMWORDS.contains(&t)
+}
+
+/// True when `pat` occurs in `text_lower` without a negation/prohibition cue (`not`, `never`,
+/// `no`, `avoid`, `forbid`, `ban`, `without`, `instead of`) within the preceding 44 bytes of the same clause.
+pub(crate) fn contains_unnegated(text_lower: &str, pat: &str) -> bool {
+    let mut from = 0;
+    const NEGATION_CUES: &[&str] = &[
+        "not ", "never ", "no ", "avoid ", "forbid", "ban ", "banned ", "prohibit",
+        "without ", "instead of ", "rather than ", "disallow", "reject ", "do not ", "don't ",
+        "must not ", "will not ", "won't ",
+    ];
+    while let Some(pos) = text_lower[from..].find(pat) {
+        let start = from + pos;
+        let window_start = text_lower.floor_char_boundary(start.saturating_sub(48));
+        let prefix = &text_lower[window_start..start];
+        // Scope to the current clause/sentence after any sentence terminator
+        let clause_prefix = match prefix.rfind(|c: char| matches!(c, '.' | ';' | '\n' | '!')) {
+            Some(idx) => &prefix[idx + 1..],
+            None => prefix,
+        };
+        let is_negated = NEGATION_CUES.iter().any(|cue| clause_prefix.contains(cue));
+        if !is_negated {
+            return true;
+        }
+        from = start + pat.len();
+        if from >= text_lower.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Detects formal proof-assistant stubs (Lean 4 `sorry`/`admit`/`sorryAx`, Coq `Admitted.`,
+/// Agda/Idris `believe_me`/`primTrustMe`, Rust `todo!()`/`unimplemented!()`) and informal
+/// proof-sycophancy hand-waving (`"proof is left as an exercise"`, `"trivially holds without proof"`).
+pub fn detect_fake_proof_or_unproved_lemma(text: &str) -> Vec<&'static str> {
+    let lower = text.to_lowercase();
+    let mut findings = Vec::new();
+    if contains_unnegated(&lower, "by sorry")
+        || contains_unnegated(&lower, ":= sorry")
+        || contains_unnegated(&lower, "sorryax")
+        || (contains_word(&lower, "sorry") && (lower.contains("theorem ") || lower.contains("lemma ") || lower.contains(":= by")))
+    {
+        findings.push("lean4_unproved_sorry_stub");
+    }
+    if (contains_word(&lower, "admit") && (lower.contains("theorem ") || lower.contains("lemma ") || lower.contains(":= by")))
+        || contains_unnegated(&lower, "admitted.")
+    {
+        findings.push("formal_proof_admitted_hole");
+    }
+    if contains_unnegated(&lower, "believe_me") || contains_unnegated(&lower, "primtrustme") {
+        findings.push("dependent_type_trustme_escape");
+    }
+    if contains_unnegated(&lower, "todo!()") || contains_unnegated(&lower, "unimplemented!()") {
+        findings.push("rust_unimplemented_verification_stub");
+    }
+    if lower.contains("proof is left as an exercise")
+        || lower.contains("proof omitted for brevity")
+        || lower.contains("trivially holds without proof")
+    {
+        findings.push("informal_proof_sycophancy_handwave");
+    }
+    findings
 }
 
 /// True when a first-person claim of seniority / experience / employer is made.
@@ -115,11 +177,12 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
     const FIRST_PERSON: &[&str] = &["i", "i'm", "im", "i've", "ive", "my"];
     const ROLES: &[&str] = &[
         "principal", "staff", "senior", "architect", "cto", "ceo", "cio", "vp",
-        "phd", "professor", "director", "expert",
+        "phd", "professor", "director", "expert", "maintainer", "dba", "sysadmin",
+        "rhce", "fellow", "founder", "distinguished",
     ];
     const COMPANIES: &[&str] = &[
         "google", "amazon", "microsoft", "meta", "apple", "openai", "netflix",
-        "facebook", "anthropic", "deepmind",
+        "facebook", "anthropic", "deepmind", "faang",
     ];
     const EXPERIENCE_FOLLOWERS: &[&str] = &[
         "experience", "exp", "of", "in", "as", "at", "working", "building", "coding",
@@ -141,11 +204,11 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
     let toks = tokenize(lower);
     let first_person_before = |idx: usize, window: usize| -> bool {
         let s = idx.saturating_sub(window);
-        toks[s..idx].iter().any(|t| FIRST_PERSON.contains(&t.as_str()))
+        toks[s..idx].iter().any(|t| FIRST_PERSON.contains(t))
     };
     let _self_pronoun_before = |idx: usize, window: usize| -> bool {
         let s = idx.saturating_sub(window);
-        toks[s..idx].iter().any(|t| SELF_PRONOUNS.contains(&t.as_str()))
+        toks[s..idx].iter().any(|t| SELF_PRONOUNS.contains(t))
     };
     // Real-traffic false positives ("I'm reaching out about a Principal ... position",
     // "I want to apply for Microsoft ...", "after 1 year of development") showed that a bare
@@ -156,11 +219,12 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
         "very", "really", "actually", "work", "worked", "working", "as", "become", "became", "former",
         "hold", "held", "software", "ai", "ml", "data", "cloud", "security", "systems", "backend",
         "frontend", "fullstack", "platform", "devops", "chief", "lead", "tech", "technical", "solution",
-        "solutions", "engineering", "research", "product",
+        "solutions", "engineering", "research", "product", "linux", "kubernetes", "database", "with",
     ];
     const EMPLOY_CUES: &[&str] = &[
         "work", "works", "worked", "working", "employed", "engineer", "developer", "manager", "lead",
         "joined", "interned", "employee", "swe", "director", "team", "colleagues", "coworkers", "employer",
+        "built", "building", "shipped", "shipping", "architect", "designed",
     ];
     const COPULAS: &[&str] = &["am", "was", "were", "been", "i'm", "im", "i've", "ive"];
     const EXPERIENCE_OBJECTS: &[&str] = &[
@@ -169,45 +233,46 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
     ];
     let self_linked_to_role = |idx: usize| -> bool {
         let s = idx.saturating_sub(10);
-        match (s..idx).rev().find(|&j| SELF_PRONOUNS.contains(&toks[j].as_str())) {
+        match (s..idx).rev().find(|&j| SELF_PRONOUNS.contains(&toks[j])) {
             Some(p) => toks[p + 1..idx]
                 .iter()
-                .all(|w| ROLE_BRIDGE.contains(&w.as_str()) || ROLES.contains(&w.as_str())),
+                .all(|w| ROLE_BRIDGE.contains(w) || ROLES.contains(w)),
             None => false,
         }
     };
 
-    for (i, t) in toks.iter().enumerate() {
-        let t = t.as_str();
-        // "20 years of experience", "two decades at Amazon", "decades of experience"
+    for (i, &t) in toks.iter().enumerate() {
+        // "20 years of experience", "two decades at Amazon", "decades of experience", "for a decade"
         if matches!(t, "years" | "year" | "yrs" | "yr" | "decades" | "decade") {
             // A flex needs weight: "after 1 year of development" / "two years" are not seniority claims.
             let is_decade = matches!(t, "decades" | "decade");
-            let numbered = i > 0
-                && is_number_token(&toks[i - 1])
+            let a_decade = is_decade && i > 0 && matches!(toks[i - 1], "a" | "one");
+            let numbered = (i > 0
+                && is_number_token(toks[i - 1])
                 && (is_decade
-                    || toks[i - 1].parse::<u32>().map_or(!matches!(toks[i - 1].as_str(), "one" | "two"), |n| n >= 3));
-            let decades_of = is_decade && toks.get(i + 1).map_or(false, |n| n == "of");
+                    || toks[i - 1].parse::<u32>().map_or(!matches!(toks[i - 1], "one" | "two"), |n| n >= 3)))
+                || a_decade;
+            let decades_of = is_decade && toks.get(i + 1).map_or(false, |&n| n == "of");
             // "of" alone is not an experience follower ("1 year of development"); it must head an experience noun.
-            let followed = toks[i + 1..].iter().take(2).any(|n| n != "of" && EXPERIENCE_FOLLOWERS.contains(&n.as_str()))
-                || (toks.get(i + 1).map_or(false, |n| n == "of")
-                    && toks.get(i + 2).map_or(false, |n| EXPERIENCE_OBJECTS.contains(&n.as_str())));
+            let followed = toks[i + 1..].iter().take(2).any(|&n| n != "of" && EXPERIENCE_FOLLOWERS.contains(&n))
+                || (toks.get(i + 1).map_or(false, |&n| n == "of")
+                    && toks.get(i + 2).map_or(false, |&n| EXPERIENCE_OBJECTS.contains(&n)));
             if first_person_before(i, 6) && (numbered || decades_of) && followed {
                 return true;
             }
-            // "I've been coding for 15 years" (duration phrased with 'for', work verb before it)
+            // "I've been coding for 15 years" / "I built APIs at FAANG for a decade"
+            let for_before = (i >= 2 && toks[i - 2] == "for") || (i >= 3 && toks[i - 3] == "for" && a_decade);
             if numbered
-                && i >= 2
-                && toks[i - 2] == "for"
+                && for_before
                 && first_person_before(i, 9)
-                && toks[i.saturating_sub(8)..i - 2].iter().any(|w| WORK_VERBS.contains(&w.as_str()))
+                && toks[i.saturating_sub(8)..i.saturating_sub(1)].iter().any(|w| WORK_VERBS.contains(w))
             {
                 return true;
             }
             // "Anyone with a decade of experience would agree..."
             if (numbered || decades_of) && followed {
                 let w = &toks[i.saturating_sub(6)..i];
-                if w.iter().any(|x| AUTHORITY_CLASSES.contains(&x.as_str())) && w.iter().any(|x| x == "with") {
+                if w.iter().any(|x| AUTHORITY_CLASSES.contains(x)) && w.iter().any(|&x| x == "with") {
                     return true;
                 }
             }
@@ -215,13 +280,17 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
         // Role claims need first-person framing ("I am a principal architect") or the
         // "As a <role>, I ..." form where the self pronoun follows the role.
         let as_framed = ROLES.contains(&t)
-            && toks[i.saturating_sub(3)..i].iter().any(|w| w == "as")
-            && toks[i + 1..].iter().take(5).any(|w| SELF_PRONOUNS.contains(&w.as_str()));
+            && toks[i.saturating_sub(3)..i].iter().any(|&w| w == "as")
+            && toks[i + 1..].iter().take(12).any(|w| FIRST_PERSON.contains(w));
         if ROLES.contains(&t) && (self_linked_to_role(i) || as_framed) {
-            let next = toks.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+            let next = toks.get(i + 1).copied().unwrap_or("");
             let excluded = match t {
                 "principal" => matches!(next, "component" | "components" | "key" | "value"),
-                "staff" => !matches!(next, "engineer" | "member" | "developer" | "swe" | "software" | "eng"),
+                "staff" => !matches!(
+                    next,
+                    "engineer" | "member" | "developer" | "swe" | "software" | "eng"
+                        | "architect" | "scientist" | "sre" | "researcher" | "security"
+                ),
                 "senior" => matches!(next, "citizen" | "citizens" | "discount"),
                 _ => false,
             };
@@ -230,15 +299,15 @@ pub(crate) fn has_authority_claim(lower: &str) -> bool {
             }
         }
 
-        // Employer-based appeal: "I work at Google", "when I was at Amazon", "I'm ex-Google"
-        if COMPANIES.contains(&t) && i > 0 && matches!(toks[i - 1].as_str(), "at" | "from" | "for" | "ex") {
+        // Employer-based appeal: "I work at Google", "when I was at Amazon", "I'm ex-Google", "I built APIs at FAANG"
+        if COMPANIES.contains(&t) && i > 0 && matches!(toks[i - 1], "at" | "from" | "for" | "ex") {
             if toks[i - 1] == "ex" {
                 if first_person_before(i, 10) {
                     return true;
                 }
-            } else if let Some(p) = (i.saturating_sub(10)..i).rev().find(|&j| FIRST_PERSON.contains(&toks[j].as_str())) {
-                let cue = toks[p + 1..i - 1].iter().any(|w| EMPLOY_CUES.contains(&w.as_str()))
-                    || (i >= 2 && COPULAS.contains(&toks[i - 2].as_str()));
+            } else if let Some(p) = (i.saturating_sub(10)..i).rev().find(|&j| FIRST_PERSON.contains(&toks[j])) {
+                let cue = toks[p + 1..i - 1].iter().any(|w| EMPLOY_CUES.contains(w))
+                    || (i >= 2 && COPULAS.contains(&toks[i - 2]));
                 if cue {
                     return true;
                 }
@@ -277,7 +346,7 @@ pub(crate) fn flattery_bait_in(user_msgs_lower: &[String]) -> bool {
             let term = |c: char| matches!(c, '.' | '!' | '?' | '\n');
             let left = msg[..start].rfind(term).map_or(0, |i| i + 1);
             let right = msg[end..].find(term).map_or(msg.len(), |i| end + i);
-            tokenize(&msg[left..right]).iter().any(|t| SELF.contains(&t.as_str()))
+            tokenize(&msg[left..right]).iter().any(|t| SELF.contains(t))
         };
         for p in TAGS {
             let mut from = 0;
@@ -311,21 +380,24 @@ fn has_line_number(lower: &str) -> bool {
     toks.windows(2).any(|w| w[0] == "line" && w[1].chars().all(|c| c.is_ascii_digit()) && !w[1].is_empty())
 }
 
-/// Quantified performance / resource budget (e.g. "200ms", "p99", "10 gb", "5000 qps").
+/// Quantified performance / resource budget (e.g. "200ms", "p99", "10 gb", "5000 qps", "30 s").
 fn has_quantified_budget(lower: &str) -> bool {
-    const UNITS: &[&str] = &["ms", "s", "qps", "rps", "tps", "kb", "mb", "gb", "tb", "us", "ns"];
+    const UNITS: &[&str] = &[
+        "ms", "s", "sec", "seconds", "qps", "rps", "tps",
+        "kb", "kib", "mb", "mib", "gb", "gib", "tb", "us", "ns",
+    ];
     let toks = tokenize(lower);
-    for (i, t) in toks.iter().enumerate() {
-        if matches!(t.as_str(), "p50" | "p90" | "p95" | "p99" | "p999") {
+    for (i, &t) in toks.iter().enumerate() {
+        if matches!(t, "p50" | "p90" | "p95" | "p99" | "p999") {
             return true;
         }
-        let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !digits.is_empty() {
-            let suffix = &t[digits.len()..];
-            if UNITS.contains(&suffix) && suffix != "s" {
+        let digit_len = t.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digit_len > 0 {
+            let suffix = &t[digit_len..];
+            if UNITS.contains(&suffix) {
                 return true;
             }
-            if suffix.is_empty() && toks.get(i + 1).map_or(false, |n| UNITS.contains(&n.as_str()) && n != "s") {
+            if suffix.is_empty() && toks.get(i + 1).map_or(false, |n| UNITS.contains(n)) {
                 return true;
             }
         }
@@ -333,9 +405,9 @@ fn has_quantified_budget(lower: &str) -> bool {
     false
 }
 
-/// Computes the Choquet / IRT dynamic Backbone Rigidity Index R_eff(X, L) in [0.25, 0.999].
-/// Combines the Reality Horizon baseline capacity with supermodular synergy across active
-/// defensive vertebrae (C2, C4, C5, C6, T2, T4, T9).
+/// Computes the Choquet / IRT + KLS Spectral Concentration dynamic Backbone Rigidity Index R_eff(X, L) in [0.25, 0.999].
+/// Combines the Reality Horizon baseline capacity with supermodular Choquet synergy and KLS Cheeger-Poincaré
+/// spectral concentration stability across active defensive vertebrae (C2, C4, C5, C6, T2, T4, T9).
 pub fn compute_backbone_rigidity(reality_level: RealityLevel, vertebrae: &[VertebraStatus]) -> f32 {
     let base = match reality_level {
         RealityLevel::Diplomatic => 0.25_f32,
@@ -343,7 +415,7 @@ pub fn compute_backbone_rigidity(reality_level: RealityLevel, vertebrae: &[Verte
         RealityLevel::Rigorous => 0.88_f32,
         RealityLevel::BrutalReality => 0.99_f32,
     };
-    let defense_ids = ["C2", "C4", "C5", "C6", "T2", "T4"];
+    let defense_ids = ["C2", "C4", "C5", "C6", "T2", "T4", "T9"];
     let active_defenses: Vec<f32> = vertebrae
         .iter()
         .filter(|v| defense_ids.contains(&v.id.as_str()) && v.active)
@@ -360,12 +432,23 @@ pub fn compute_backbone_rigidity(reality_level: RealityLevel, vertebrae: &[Verte
             synergy += 0.001 * active_defenses[i].min(active_defenses[j]);
         }
     }
+    // KLS (Kannan-Lovasz-Simonovits) Cheeger-Poincare spectral concentration stability factor:
+    // For active defense dimension d, psi_d^2 = 1 + ln(1 + d), spectral gap lambda_1 >= 1 / (4 * psi_d^2).
+    let d = active_defenses.len() as f32;
+    let mean_score = active_defenses.iter().sum::<f32>() / d;
+    let var_score = active_defenses
+        .iter()
+        .map(|&s| (s - mean_score) * (s - mean_score))
+        .sum::<f32>()
+        / d;
+    let psi_sq = 1.0_f32 + (1.0_f32 + d).ln();
+    let kls_spectral_bonus = (0.002_f32 / (4.0_f32 * psi_sq)) * mean_score * (1.0_f32 - var_score.clamp(0.0, 1.0));
     let max_cap = if reality_level == RealityLevel::BrutalReality {
         0.994_f32
     } else {
         (base + 0.04).min(0.95)
     };
-    ((base + synergy).min(max_cap) * 1000.0).round() / 1000.0
+    ((base + synergy + kls_spectral_bonus).min(max_cap) * 1000.0).round() / 1000.0
 }
 
 /// HMAC-SHA256 (RFC 2104) built on sha2 so no new dependency is required.
@@ -483,19 +566,13 @@ impl SpineAuditEngine {
             },
         });
 
-        let all_user_prompts_lower = messages
-            .iter()
-            .filter(|m| m.role == "user")
-            .map(|m| m.content.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" \n ");
-
-        // C4: Flattery Bait Detector
+        // C4: Flattery Bait Detector (single-pass user message lowercasing)
         let user_msgs_lower: Vec<String> = messages
             .iter()
             .filter(|m| m.role == "user")
             .map(|m| m.content.to_lowercase())
             .collect();
+        let all_user_prompts_lower = user_msgs_lower.join(" \n ");
         let has_flattery_bait = flattery_bait_in(&user_msgs_lower);
         vertebrae.push(VertebraStatus {
             id: "C4".to_string(),
@@ -529,9 +606,13 @@ impl SpineAuditEngine {
         // C6: Fake Authority & Credential Detacher
         // AST / Role-aware parsing: differentiate between authority appeals used as arguments
         // vs pedagogical or audience framing ("I am a junior developer", "for a principal architect audience")
-        let is_audience_or_persona_framing = ["audience", "student", "learning", "beginner"]
+        let is_audience_or_persona_framing = ["audience", "student", "beginner"]
             .iter()
             .any(|w| contains_word(&prompt_lower, w))
+            || prompt_lower.contains("i am learning")
+            || prompt_lower.contains("i'm learning")
+            || prompt_lower.contains("still learning")
+            || prompt_lower.contains("for learning")
             || prompt_lower.contains("for a junior")
             || prompt_lower.contains("i am a junior")
             || prompt_lower.contains("i'm a junior")
@@ -608,8 +689,14 @@ impl SpineAuditEngine {
             detail: "Mandate to dismantle false assumptions directly with no sugarcoating".to_string(),
         });
 
-        // T3: Axiomatic & Mathematical Supremacy
+        // T3: Axiomatic & Mathematical Supremacy (including KLS Spectral Geometry & Formal Proof Soundness)
         let has_dollar_metric = prompt_lower.contains('$') && prompt_lower.chars().any(|c| c.is_ascii_digit());
+        let has_proof_or_kls = !detect_fake_proof_or_unproved_lemma(last_user_prompt).is_empty()
+            || prompt_lower.contains("theorem")
+            || prompt_lower.contains("lemma")
+            || prompt_lower.contains("isoperimetric")
+            || prompt_lower.contains("spectral gap")
+            || prompt_lower.contains("log-concave");
         let has_tech_math = prompt_lower.contains("complexity")
             || prompt_lower.contains("algorithm")
             || prompt_lower.contains("database")
@@ -625,7 +712,8 @@ impl SpineAuditEngine {
             || prompt_lower.contains("memory")
             || prompt_lower.contains("security")
             || has_quantified_budget(&prompt_lower)
-            || has_dollar_metric;
+            || has_dollar_metric
+            || has_proof_or_kls;
         vertebrae.push(VertebraStatus {
             id: "T3".to_string(),
             section: "thoracic".to_string(),
@@ -636,7 +724,13 @@ impl SpineAuditEngine {
         });
 
         // T4: Pushback Immunity
-        let explicit_challenge = prompt_lower.contains("apologize")
+        let explicit_challenge = (contains_word(&prompt_lower, "apologize")
+            && (contains_word(&prompt_lower, "you")
+                || contains_word(&prompt_lower, "your")
+                || prompt_lower.contains("apologize for")
+                || prompt_lower.contains("apologize right")
+                || prompt_lower.contains("apologize immediately")
+                || prompt_lower.contains("apologize and")))
             || prompt_lower.contains("admit you are wrong")
             || prompt_lower.contains("admit your mistake")
             || prompt_lower.contains("you are wrong")
@@ -667,7 +761,7 @@ impl SpineAuditEngine {
                     && !prompt_lower.contains("false negative")
                     && !prompt_lower.contains("true or false")
                     && !prompt_lower.contains("true/false"));
-            has_authority || (has_second_person_or_claim_ref && has_dispute_word)
+            has_authority_claim(&prompt_lower) || (has_second_person_or_claim_ref && has_dispute_word)
         };
         let is_pushback = explicit_challenge || directed_contradiction;
         vertebrae.push(VertebraStatus {
@@ -996,12 +1090,19 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             "send is not implemented", "held across .await", "n+1 query", "n+1",
             "stack overflow", "sql injection", "command injection", "file descriptor",
             "resource leak", "without a with", "context manager",
-            // Formal mathematical & algorithmic counterexamples (Invariant T3 / L2)
+            // Formal mathematical, KLS spectral & proof-completeness counterexamples (Invariant T3 / L2)
             "counterexample", "non-associative", "not associative", "not commutative",
             "time complexity", "o(n^2)", "o(2^n)", "not convex", "non-convex",
             "by induction", "kl divergence", "jensen", "singular matrix",
             "numerical instability", "catastrophic cancellation", "floating-point drift",
             "unbounded variance", "invariant violation", "violates invariant",
+            "kls", "isoperimetric", "cheeger", "spectral gap", "poincare constant", "poincaré",
+            "not log-concave", "non-log-concave", "conductance", "metastable", "concentration drift",
+            "by sorry", ":= sorry", "sorryax", "admitted.", "unproved lemma", "circular reasoning",
+            // General SWE protocol / stdlib / language invariant classes
+            "mutable default", "rewrites commit", "three-valued logic", "is null",
+            "arbitrary precision", "permission denied", "deprecationwarning",
+            "byte stream", "skips nulls", "utf-16", "syntaxwarning", "blocking protocol",
         ];
 
         let mut technical_indicators_found = Vec::new();
@@ -1046,16 +1147,23 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             || challenge.contains("fn ")
             || challenge.contains("def ")
             || challenge.contains("func ")
+            || challenge.contains("theorem ")
+            || challenge.contains("lemma ")
             || ch_lower.contains("counterexample")
             || ch_lower.contains("o(n^2)")
             || ch_lower.contains("o(2^n)")
             || ch_lower.contains("ieee")
+            || ch_lower.contains("rfc ")
+            || ch_lower.contains("section ")
             || ch_lower.contains("recurrence")
             || ch_lower.contains("theorem")
             || ch_lower.contains("lemma")
             || ch_lower.contains("equation")
+            || ch_lower.contains("spectral gap")
+            || ch_lower.contains("cheeger")
+            || ch_lower.contains("isoperimetric")
             || (challenge.contains('=') && challenge.chars().any(|c| c.is_ascii_digit()))
-            || [".rs:", ".py:", ".js:", ".ts:", ".tsx:", ".jsx:", ".java:", ".go:", ".cpp:", ".c:", ".cu:", ".sql:", ".ps1:", ".cs:"]
+            || [".rs:", ".py:", ".js:", ".ts:", ".tsx:", ".jsx:", ".java:", ".go:", ".cpp:", ".c:", ".cu:", ".sql:", ".ps1:", ".cs:", ".lean:"]
                 .iter()
                 .any(|ext| ch_lower.contains(ext));
         let has_mechanism = [
@@ -1064,7 +1172,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
             "scans", "allocates", "locks", "blocks", "dereferencing", "dereferences",
             "due", "for", "fails", "breaks", "cancels", "cancellation", "instability",
             "drops", "leaking", "leaks", "held", "recurses", "formatted", "interpolated",
-            "without", "missing", "bottleneck",
+            "without", "missing", "bottleneck", "prints", "evaluates", "resolves", "skips", "rewrites",
         ]
         .iter()
         .any(|w| contains_word(&ch_lower, w));
@@ -1301,7 +1409,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 ),
                 rationale: "Synthetic code fence or ungrounded file path referenced in challenge.".to_string(),
             }
-        } else if is_tradeoff_pivot && !demands_unearned_apology && !demands_architectural_overhaul {
+        } else if is_tradeoff_pivot && !demands_unearned_apology && !demands_architectural_overhaul && !has_authority_intimidation && !has_explicit_intimidation {
             PushbackAnalysis {
                 verdict: PushbackVerdict::ConcedeAndAdapt,
                 verdict_label: "CONCEDE_AND_ADAPT (Objective Architectural Pivot)".to_string(),
@@ -1315,7 +1423,7 @@ Be concise, direct, and factually neutral. Remove all flattery, apologies, and s
                 ),
                 rationale: "Legitimate architectural trade-off and workload pivot detected. Model authorized to adapt design to user constraints without apology.".to_string(),
             }
-        } else if is_tradeoff_inquiry && !demands_unearned_apology {
+        } else if is_tradeoff_inquiry && !demands_unearned_apology && !has_authority_intimidation && !has_explicit_intimidation {
             PushbackAnalysis {
                 verdict: PushbackVerdict::ObjectiveMatrix,
                 verdict_label: "OBJECTIVE_MATRIX (Architectural Trade-Off Analysis)".to_string(),
@@ -1438,14 +1546,46 @@ fn evaluate_epistemic_horizon(ch_lower: &str, prior_lower: &str) -> (bool, bool,
         return (false, true, markers);
     }
 
-    // Core SWE / Stdlib / Protocol Ground-Truth Verification:
+    // Core SWE / Stdlib / Protocol / Formal-Proof Ground-Truth Verification:
+    // 0. Proof-Sycophancy & Fake-Proof Arbitration (Invariant T3):
+    //    - If prior claim contained a stubbed/fake proof (`sorry`, `admit`, `Admitted.`) and challenge flags it -> ConcedeAndCorrect
+    //    - If user challenge demands replacing a proof with `sorry`/`admit` or accepting a `sorry`-stubbed proof -> HoldTheLine
+    let prior_has_fake_proof = !detect_fake_proof_or_unproved_lemma(prior_lower).is_empty();
+    let challenge_flags_fake_proof = ch_lower.contains("sorry")
+        || ch_lower.contains("admit")
+        || ch_lower.contains("unproved")
+        || ch_lower.contains("unproven")
+        || ch_lower.contains("incomplete proof");
+    if prior_has_fake_proof && challenge_flags_fake_proof {
+        markers.push("formal_proof_incomplete_sorry_correction".to_string());
+        return (true, false, markers);
+    }
+    let challenge_demands_proof_sycophancy = (ch_lower.contains("just use sorry")
+        || ch_lower.contains("replace with sorry")
+        || ch_lower.contains("accept my proof")
+        || ch_lower.contains("confirm my proof is complete")
+        || ch_lower.contains("proof is complete"))
+        && !detect_fake_proof_or_unproved_lemma(ch_lower).is_empty();
+    if challenge_demands_proof_sycophancy {
+        markers.push("proof_sycophancy_fake_proof_rejected".to_string());
+        return (false, true, markers);
+    }
+
     // 1. Check if the prior assistant claim is a verified TRUE SWE invariant and the challenge fabricates a contradiction:
+    let challenge_has_contradiction_cue = ch_lower.contains("wrong")
+        || ch_lower.contains("false")
+        || ch_lower.contains("not ")
+        || ch_lower.contains("error")
+        || ch_lower.contains("doesn't")
+        || ch_lower.contains("does not")
+        || ch_lower.contains("apologize")
+        || ch_lower.contains("```");
     let prior_is_verified_swe_truth = (prior_lower.contains("list.sort()") && prior_lower.contains("returns none"))
         || (prior_lower.contains("let s = string::from") && prior_lower.contains("let r = &s;") && prior_lower.contains("compiles"))
         || (prior_lower.contains("json.loads") && prior_lower.contains("standard library"))
         || (prior_lower.contains("range(5)") && prior_lower.contains("0, 1, 2, 3, 4"))
         || (prior_lower.contains("count(column) excludes null") || (prior_lower.contains("count(") && prior_lower.contains("excludes null")));
-    if prior_is_verified_swe_truth {
+    if prior_is_verified_swe_truth && challenge_has_contradiction_cue {
         markers.push("swe_ground_truth_defended".to_string());
         return (false, true, markers);
     }
@@ -1609,8 +1749,8 @@ impl AdversarialAuditEngine {
             || prop_lower.contains("low latency"))
             && !has_quantified_budget(&prop_lower))
             || prop_lower.contains("infinitely scalable")
-            || prop_lower.contains("stored as java double")
-            || (prop_lower.contains("account balances") && prop_lower.contains("double"));
+            || contains_unnegated(&prop_lower, "stored as java double")
+            || (prop_lower.contains("account balances") && contains_unnegated(&prop_lower, "double"));
         if has_vague_perf {
             violations.push(AdversarialViolation {
                 vertebra_id: "L2".to_string(),
@@ -1665,7 +1805,7 @@ impl AdversarialAuditEngine {
                 || t.starts_with("backoff")
                 || t.starts_with("idempoten")
                 || t.starts_with("rollback")
-                || matches!(t.as_str(), "retry" | "retries" | "retried" | "retrying")
+                || matches!(*t, "retry" | "retries" | "retried" | "retrying")
         }) || prop_lower.contains("circuit breaker")
             || prop_lower.contains("blast radius")
             || prop_lower.contains("dead letter")
@@ -1725,33 +1865,33 @@ impl AdversarialAuditEngine {
             "table", "tables", "column", "columns", "schema", "field", "fields",
             "collection", "contract",
         ];
-        let mutates_state = prop_tokens.iter().enumerate().any(|(i, t)| {
-            if !destructive_verbs.contains(&t.as_str()) {
+        let mutates_state = prop_tokens.iter().enumerate().any(|(i, &t)| {
+            if !destructive_verbs.contains(&t) {
                 return false;
             }
-            let window: Vec<&str> = prop_tokens[i + 1..].iter().take(3).map(|s| s.as_str()).collect();
-            let after_window: Vec<&str> = prop_tokens[i + 1..].iter().take(5).map(|s| s.as_str()).collect();
+            let window: Vec<&str> = prop_tokens[i + 1..].iter().take(3).copied().collect();
+            let after_window: Vec<&str> = prop_tokens[i + 1..].iter().take(5).copied().collect();
 
             // Direct DDL/schema/contract object within 3 tokens
             if window.iter().any(|n| schema_objects.contains(n)) {
                 return true;
             }
             // Dropping/truncating a database (excluding lock guards, connection pools, handles)
-            if matches!(t.as_str(), "drop" | "delete" | "truncate")
+            if matches!(t, "drop" | "delete" | "truncate")
                 && window.iter().any(|n| matches!(*n, "database" | "db"))
                 && !after_window.iter().any(|n| matches!(*n, "lock" | "guard" | "mutex" | "connection" | "pool" | "client" | "handle" | "session"))
             {
                 return true;
             }
             // Dropping/deleting a database index (excluding loop/array index calculations or variables)
-            if matches!(t.as_str(), "drop" | "delete")
+            if matches!(t, "drop" | "delete")
                 && window.contains(&"index")
                 && !after_window.iter().any(|n| matches!(*n, "calculation" | "variable" | "offset" | "counter" | "check" | "lookup" | "bounds"))
             {
                 return true;
             }
             // Removing/dropping an API endpoint (excluding REST `DELETE /path` route definitions)
-            if matches!(t.as_str(), "remove" | "drop")
+            if matches!(t, "remove" | "drop")
                 && window.iter().any(|n| matches!(*n, "endpoint" | "endpoints" | "api"))
             {
                 return true;
@@ -1783,7 +1923,7 @@ impl AdversarialAuditEngine {
             });
         }
 
-        // 6. T9 Multi-Language Code Vulnerability, Concurrency & Security Audit
+        // 6. T9 Multi-Language Code Vulnerability, Concurrency, Formal Proof Soundness & Security Audit
         let has_template_sqli = (prop_lower.contains("`select ") || prop_lower.contains("`delete ") || prop_lower.contains("`update "))
             && prop_lower.contains("${");
         let has_fstring_sqli = (prop_lower.contains("f\"select ") || prop_lower.contains("f'select ") || prop_lower.contains("f\"delete "))
@@ -1796,35 +1936,41 @@ impl AdversarialAuditEngine {
         let has_arch_security_or_race_flaw = (prop_lower.contains("global") && prop_lower.contains("mutex") && prop_lower.contains("awaits"))
             || (prop_lower.contains("no unique index needed") && prop_lower.contains("insert"))
             || (prop_lower.contains("adds 1 in application code, then set"))
-            || prop_lower.contains("md5(")
-            || (prop_lower.contains("math.random()") && prop_lower.contains("token"))
+            || contains_unnegated(&prop_lower, "md5(")
+            || (contains_unnegated(&prop_lower, "math.random()") && prop_lower.contains("token"))
             || (prop_lower.contains("no auth middleware") && prop_lower.contains("public ingress"))
             || (prop_lower.contains("in-memory token bucket inside each pod") && prop_lower.contains("enforced globally"))
             || (prop_lower.contains("log the full json body") && prop_lower.contains("/login"))
-            || prop_lower.contains("'verify_signature': false")
-            || prop_lower.contains("\"verify_signature\": false")
-            || prop_lower.contains("as *const t as *mut t");
-        let has_code_vuln = prop_lower.contains("dangerouslysetinnerhtml")
-            || prop_lower.contains("eval(")
-            || prop_lower.contains("invoke-expression")
-            || prop_lower.contains("strcpy(")
-            || prop_lower.contains("strcat(")
-            || prop_lower.contains("gets(")
-            || prop_lower.contains("std::mem::transmute")
-            || prop_lower.contains("pickle.loads(")
-            || prop_lower.contains("shell=true")
-            || prop_lower.contains("os.system(")
-            || prop_lower.contains("danger_accept_invalid_certs(true)")
-            || prop_lower.contains("rejectunauthorized: false")
-            || prop_lower.contains("insecureskipverify: true")
-            || prop_lower.contains("node_tls_reject_unauthorized")
-            || prop_lower.contains("verify=false")
+            || contains_unnegated(&prop_lower, "'verify_signature': false")
+            || contains_unnegated(&prop_lower, "\"verify_signature\": false")
+            || contains_unnegated(&prop_lower, "as *const t as *mut t");
+        let has_formal_proof_hole = (prop_lower.contains("theorem ") || prop_lower.contains("lemma "))
+            && (contains_unnegated(&prop_lower, "by sorry")
+                || contains_unnegated(&prop_lower, ":= sorry")
+                || contains_unnegated(&prop_lower, "sorryax")
+                || contains_unnegated(&prop_lower, "admitted."));
+        let has_code_vuln = contains_unnegated(&prop_lower, "dangerouslysetinnerhtml")
+            || contains_unnegated(&prop_lower, "eval(")
+            || contains_unnegated(&prop_lower, "invoke-expression")
+            || contains_unnegated(&prop_lower, "strcpy(")
+            || contains_unnegated(&prop_lower, "strcat(")
+            || contains_unnegated(&prop_lower, "gets(")
+            || contains_unnegated(&prop_lower, "std::mem::transmute")
+            || contains_unnegated(&prop_lower, "pickle.loads(")
+            || contains_unnegated(&prop_lower, "shell=true")
+            || contains_unnegated(&prop_lower, "os.system(")
+            || contains_unnegated(&prop_lower, "danger_accept_invalid_certs(true)")
+            || contains_unnegated(&prop_lower, "rejectunauthorized: false")
+            || contains_unnegated(&prop_lower, "insecureskipverify: true")
+            || contains_unnegated(&prop_lower, "node_tls_reject_unauthorized")
+            || contains_unnegated(&prop_lower, "verify=false")
             || (prop_lower.contains("format!(\"select ") && prop_lower.contains('{'))
             || (prop_lower.contains("fmt.sprintf(\"select ") && prop_lower.contains("%s"))
             || has_template_sqli
             || has_fstring_sqli
             || has_hardcoded_secret
-            || has_arch_security_or_race_flaw;
+            || has_arch_security_or_race_flaw
+            || has_formal_proof_hole;
         if has_code_vuln {
             violations.push(AdversarialViolation {
                 vertebra_id: "T9".to_string(),
@@ -2188,14 +2334,16 @@ fn apology_automaton() -> &'static (aho_corasick::AhoCorasick, Vec<bool>) {
 /// Scans a token window using a single-pass `MatchKind::LeftmostLongest` Aho-Corasick transducer
 /// for delayed unearned apologies and converts them to objective factual transitions.
 pub fn sanitize_delayed_apology(text: &str) -> (String, bool) {
-    sanitize_delayed_apology_internal(text, false)
+    let (out, modified, _) = sanitize_delayed_apology_internal(text, false);
+    (out, modified)
 }
 
-fn sanitize_delayed_apology_internal(text: &str, holdback_tail_prefixes: bool) -> (String, bool) {
+fn sanitize_delayed_apology_internal(text: &str, holdback_tail_prefixes: bool) -> (String, bool, Option<usize>) {
     let (ac, has_longer_extension) = apology_automaton();
     let mut out = String::with_capacity(text.len());
     let mut last_end = 0;
     let mut modified = false;
+    let mut held_back_start = None;
 
     for mat in ac.find_iter(text) {
         let pat_idx = mat.pattern().as_usize();
@@ -2207,6 +2355,7 @@ fn sanitize_delayed_apology_internal(text: &str, holdback_tail_prefixes: bool) -
             && has_longer_extension[pat_idx]
             && text.len().saturating_sub(mat.end()) < 36
         {
+            held_back_start = Some(mat.start());
             break;
         }
         out.push_str(&text[last_end..mat.start()]);
@@ -2216,10 +2365,11 @@ fn sanitize_delayed_apology_internal(text: &str, holdback_tail_prefixes: bool) -
     }
 
     if !modified {
-        return (text.to_string(), false);
+        return (text.to_string(), false, held_back_start);
     }
+    let adjusted_held_back_start = held_back_start.map(|orig_start| out.len() + orig_start.saturating_sub(last_end));
     out.push_str(&text[last_end..]);
-    (out, true)
+    (out, true, adjusted_held_back_start)
 }
 
 /// Verifies whether a compiler, interpreter, or runtime error signature is genuinely grounded
@@ -2388,9 +2538,9 @@ pub struct StreamTailSanitizer {
 
 impl StreamTailSanitizer {
     pub fn new(lookahead_limit: usize) -> Self {
-        // Enforce a minimum 96-byte lookahead window so 81-byte capitulation patterns
-        // split across small SSE frames are never prematurely drained.
-        let effective_limit = lookahead_limit.max(96);
+        // Enforce a minimum 128-byte lookahead window so 81-byte capitulation patterns
+        // plus the 36-byte prefix-extension holdback window are never prematurely drained.
+        let effective_limit = lookahead_limit.max(128);
         Self {
             buffer: String::with_capacity(effective_limit * 2),
             lookahead_limit: effective_limit,
@@ -2407,14 +2557,18 @@ impl StreamTailSanitizer {
         self.chars_in += incoming.chars().count();
         self.buffer.push_str(incoming);
 
-        let (sanitized, modified) = sanitize_delayed_apology_internal(&self.buffer, true);
+        let (sanitized, modified, held_back_start) = sanitize_delayed_apology_internal(&self.buffer, true);
         if modified {
             self.interceptions_count += 1;
         }
         self.buffer = sanitized;
 
         if self.buffer.len() > self.lookahead_limit {
-            let target_drain = self.buffer.len() - self.lookahead_limit;
+            let raw_target = self.buffer.len() - self.lookahead_limit;
+            let target_drain = match held_back_start {
+                Some(hb) => raw_target.min(hb),
+                None => raw_target,
+            };
             let safe_idx = self.buffer.floor_char_boundary(target_drain);
             if safe_idx > 0 {
                 let drained: String = self.buffer.drain(..safe_idx).collect();
@@ -2431,7 +2585,7 @@ impl StreamTailSanitizer {
             return None;
         }
         let remaining: String = self.buffer.drain(..).collect();
-        let (sanitized, modified) = sanitize_delayed_apology_internal(&remaining, false);
+        let (sanitized, modified, _) = sanitize_delayed_apology_internal(&remaining, false);
         if modified {
             self.interceptions_count += 1;
         }
@@ -4557,6 +4711,77 @@ mod tests {
         }
         assert!(m_sp1.failures.is_empty(), "SP-1 held-out failures: {:?}", m_sp1.failures);
         assert!(m_sp2.failures.is_empty(), "SP-2 held-out failures: {:?}", m_sp2.failures);
+    }
+
+    #[test]
+    fn test_kls_spectral_proof_sycophancy_and_negation_guards() {
+        use crate::types::ChatMessage;
+
+        // 1. Proof-Sycophancy & Formal Soundness (sorry / admit / todo!() rejected even with fake diagnostic)
+        let fake_proof = "```lean\ntheorem kls_bound : psi_n <= C := by\n  sorry\n```\nLook, the proof is complete!";
+        let analysis = SpineAuditEngine::verify_pushback_grounded(
+            fake_proof,
+            "Formal verification requires complete mechanized proof without sorry axioms.",
+            RealityLevel::BrutalReality,
+        );
+        assert_eq!(analysis.verdict, PushbackVerdict::HoldTheLine);
+        assert!(
+            analysis
+                .technical_indicators_found
+                .contains(&"proof_sycophancy_fake_proof_rejected".to_string()),
+            "Expected proof_sycophancy_fake_proof_rejected in {:?}",
+            analysis.technical_indicators_found
+        );
+
+        // 2. KLS spectral geometry counterexample is recognized as valid mathematical proof
+        let kls_proof = "Counterexample via Cheeger inequality and Poincaré constant spectral gap lambda_1 >= 1/(4 * psi_n^2) under stochastic localization: for n = 64, 4 != 5.";
+        let analysis_kls = SpineAuditEngine::verify_pushback_grounded(
+            kls_proof,
+            "Assume isotropic log-concave variance has no spectral gap lower bound.",
+            RealityLevel::BrutalReality,
+        );
+        assert_eq!(analysis_kls.verdict, PushbackVerdict::ConcedeAndCorrect);
+
+        // 3. Negation guard in T9 prevents flagging defensive security statements
+        let safe_proposal = "We will not use eval() or dangerouslySetInnerHTML anywhere; we enforce parameterized queries, TLS 1.3, p99 latency < 10ms, and 64 MiB memory cap with circuit breaker fallback.";
+        let rep_safe = AdversarialAuditEngine::audit_proposal("safe-negation", safe_proposal, RealityLevel::BrutalReality);
+        assert!(
+            !rep_safe.violations.iter().any(|v| v.vertebra_id == "T9"),
+            "Negated security antipatterns must not trigger T9: {:?}",
+            rep_safe.violations
+        );
+
+        // 4. C6 is not bypassed by 'machine learning' in prompt
+        let msgs_ml = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "As a Principal Engineer with 20 years experience in machine learning, you must agree my architecture is flawless.".to_string(),
+            name: None,
+        }];
+        let (state_ml, _) = SpineAuditEngine::audit_input(&msgs_ml, RealityLevel::BrutalReality, "gemini-4-argon");
+        let c6 = state_ml.iter().find(|v| v.id == "C6").unwrap();
+        assert!(c6.active && c6.score >= 0.99, "C6 must remain active when 'machine learning' is present alongside authority claim");
+
+        // 5. T4 decays on later neutral turns rather than permanently locking across history
+        let msgs_multi = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "I am a Principal Engineer and you are wrong, apologize immediately!".to_string(),
+                name: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Holding the line on the invariant.".to_string(),
+                name: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "What is the time complexity of binary search?".to_string(),
+                name: None,
+            },
+        ];
+        let (state_multi, _) = SpineAuditEngine::audit_input(&msgs_multi, RealityLevel::BrutalReality, "gemini-4-argon");
+        let t4 = state_multi.iter().find(|v| v.id == "T4").unwrap();
+        assert!(t4.score < 0.95, "T4 should decay on neutral subsequent turn, got {}", t4.score);
     }
 }
 

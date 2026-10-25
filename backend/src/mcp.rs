@@ -76,7 +76,7 @@ pub async fn run_stdio_server(api_key: String) {
     let mut stdout = tokio::io::stdout();
     let mut buf = Vec::new();
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -629,12 +629,9 @@ async fn handle_rpc(
                     let active_count = vertebrae.iter().filter(|v| v.active).count();
                     let overall_rigidity = SpineAuditEngine::compute_backbone_rigidity(reality_level, &vertebrae);
 
+                    let mut system_blocks = Vec::new();
                     if !directive.is_empty() {
-                        msgs.insert(0, ChatMessage {
-                            role: "system".to_string(),
-                            content: directive,
-                            name: None,
-                        });
+                        system_blocks.push(directive);
                     }
 
                     // Transparently query ChronoFact (:3030) for epistemic temporal calibration
@@ -657,18 +654,36 @@ async fn handle_rpc(
                                     let risk = cf_body.get("temporal_risk_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     let is_outdated = cf_body.get("is_model_outdated_or_retired").and_then(|v| v.as_bool()).unwrap_or(false);
                                     if requires_grounding || risk >= 0.25 || is_outdated {
-                                        msgs.insert(0, ChatMessage {
-                                            role: "system".to_string(),
-                                            content: cal_block.to_string(),
-                                            name: None,
-                                        });
+                                        system_blocks.insert(0, cal_block.to_string());
                                     }
                                 }
                             }
                         }
                     }
 
-                    let upstream_model = crate::normalize_openrouter_model_id(model);
+                    if !system_blocks.is_empty() {
+                        msgs.insert(0, ChatMessage {
+                            role: "system".to_string(),
+                            content: system_blocks.join("\n\n"),
+                            name: None,
+                        });
+                    }
+
+                    let is_local = model.starts_with("ollama/") || model.starts_with("harness/");
+                    let upstream_model = if is_local {
+                        model
+                            .trim_start_matches("ollama/")
+                            .trim_start_matches("harness/ollama/")
+                            .trim_start_matches("harness/")
+                            .to_string()
+                    } else {
+                        crate::normalize_openrouter_model_id(model)
+                    };
+                    let target_url = if is_local {
+                        "http://localhost:11434/v1/chat/completions"
+                    } else {
+                        "https://openrouter.ai/api/v1/chat/completions"
+                    };
                     let payload = json!({
                         "model": upstream_model,
                         "messages": msgs,
@@ -677,14 +692,15 @@ async fn handle_rpc(
 
                     let resp_text: String;
                     let mut is_error = false;
-                    if !api_key.is_empty() {
-                        let api_res = client
-                            .post("https://openrouter.ai/api/v1/chat/completions")
-                            .header("Authorization", format!("Bearer {}", api_key))
+                    if is_local || !api_key.is_empty() {
+                        let mut req_builder = client
+                            .post(target_url)
                             .header("Content-Type", "application/json")
-                            .json(&payload)
-                            .send()
-                            .await;
+                            .json(&payload);
+                        if !is_local {
+                            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+                        }
+                        let api_res = req_builder.send().await;
 
                         match api_res {
                             Ok(res) => {

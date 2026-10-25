@@ -1,12 +1,12 @@
 {
   "mcpServers": {
     "spine": {
-      "command": "C:\\spine\\backend\\target\\debug\\spine-gateway.exe",
+      "command": "C:\\spine\\bin\\spine.exe",
       "args": ["mcp"],
       "env": {
         "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
       },
-      "cwd": "C:\\spine\\backend",
+      "cwd": "C:\\spine",
       "disabledTools": []
     }
   }

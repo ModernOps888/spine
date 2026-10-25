@@ -18,12 +18,16 @@ pub fn extract_text_from_content_value(val: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         Value::Array(parts) => {
-            let mut texts = Vec::new();
+            let mut texts: Vec<&str> = Vec::with_capacity(parts.len());
             for part in parts {
                 if let Some(s) = part.as_str() {
-                    texts.push(s.to_string());
+                    texts.push(s);
                 } else if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                    texts.push(t.to_string());
+                    texts.push(t);
+                } else if let Some(c) = part.get("content").and_then(|v| v.as_str()) {
+                    texts.push(c);
+                } else if let Some(th) = part.get("thinking").and_then(|v| v.as_str()) {
+                    texts.push(th);
                 }
             }
             texts.join("\n")

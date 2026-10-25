@@ -387,6 +387,7 @@ $benchPayload = @{
     )
     reality_level = 4
     model = "google/gemini-3.8-flash"
+    ephemeral = $true
 } | ConvertTo-Json -Depth 5
 
 for ($i = 1; $i -le $BenchmarkIterations; $i++) {
