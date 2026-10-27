@@ -7,13 +7,13 @@
     "StartupParity":  true,
     "Benchmark":  {
                       "Iterations":  100,
-                      "TotalElapsedSec":  0.163,
-                      "ThroughputQPS":  614.8,
-                      "MinLatencyMs":  1.04,
-                      "MaxLatencyMs":  17.4,
-                      "AvgLatencyMs":  1.57,
-                      "P50LatencyMs":  1.2,
-                      "P95LatencyMs":  2.63,
-                      "P99LatencyMs":  17.4
+                      "TotalElapsedSec":  0.165,
+                      "ThroughputQPS":  607.4,
+                      "MinLatencyMs":  1,
+                      "MaxLatencyMs":  20.6,
+                      "AvgLatencyMs":  1.59,
+                      "P50LatencyMs":  1.25,
+                      "P95LatencyMs":  2.32,
+                      "P99LatencyMs":  20.6
                   }
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use crate::vertebrae::{RealityLevel, SpineAuditEngine};
 use crate::types::ChatMessage;
 
@@ -70,24 +70,91 @@ impl JsonRpcResponse {
     }
 }
 
+/// Maximum accepted JSON-RPC frame size on stdin (16 MB). Oversized frames are drained to the
+/// next newline and rejected so a single runaway payload can never desynchronize the stream.
+const MAX_MCP_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Rewrites `localhost` to `127.0.0.1` for loopback telemetry calls. On Windows, `localhost`
+/// resolves to `::1` first; when the gateway listens on IPv4 only, every connection pays an
+/// IPv6 connect-refused round trip (and SYN retries) before falling back to IPv4.
+pub fn normalize_loopback_base(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    trimmed
+        .replacen("://localhost:", "://127.0.0.1:", 1)
+        .replacen("://localhost/", "://127.0.0.1/", 1)
+        .replacen("://[::1]:", "://127.0.0.1:", 1)
+}
+
+/// Fire-and-forget HUD telemetry broadcast. Tool responses never wait on the HUD gateway,
+/// so a slow, restarting, or offline gateway adds zero latency to an IDE turn.
+fn spawn_hud_notify(client: &reqwest::Client, gateway_base: &str, payload: Value) {
+    let client = client.clone();
+    let endpoint = format!("{}/api/spine/notify", gateway_base);
+    tokio::spawn(async move {
+        let _ = client
+            .post(endpoint)
+            .timeout(std::time::Duration::from_millis(600))
+            .json(&payload)
+            .send()
+            .await;
+    });
+}
+
 pub async fn run_stdio_server(api_key: String) {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
-    let mut stdout = tokio::io::stdout();
     let mut buf = Vec::new();
     let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
+    let api_key = std::sync::Arc::new(api_key);
+
+    // Single writer task: responses from concurrently executing requests are serialized onto
+    // stdout one full frame at a time (no interleaved bytes), and a slow tool call such as
+    // `spine_execute_grounded_reality` (upstream LLM, up to 60s) never blocks a fast
+    // `spine_reality_audit` or `ping` queued behind it (no head-of-line blocking).
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(mut frame) = out_rx.recv().await {
+            frame.push('\n');
+            if stdout.write_all(frame.as_bytes()).await.is_err() {
+                break;
+            }
+            let _ = stdout.flush().await;
+        }
+    });
+
+    let mut in_flight = tokio::task::JoinSet::new();
 
     loop {
         buf.clear();
-        let bytes_read = match reader.read_until(b'\n', &mut buf).await {
+        let bytes_read = match (&mut reader).take(MAX_MCP_LINE_BYTES as u64).read_until(b'\n', &mut buf).await {
             Ok(n) => n,
             Err(_) => break,
         };
         if bytes_read == 0 {
             break;
+        }
+
+        // Oversized frame: drain the remainder up to the next newline and reject it.
+        if bytes_read >= MAX_MCP_LINE_BYTES && buf.last() != Some(&b'\n') {
+            let mut sink = Vec::new();
+            loop {
+                sink.clear();
+                match (&mut reader).take(MAX_MCP_LINE_BYTES as u64).read_until(b'\n', &mut sink).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if sink.last() == Some(&b'\n') => break,
+                    Ok(_) => continue,
+                }
+            }
+            let err_resp = JsonRpcResponse::error(None, -32600, "Request frame exceeds 16 MB limit");
+            if let Ok(out) = serde_json::to_string(&err_resp) {
+                let _ = out_tx.send(out);
+            }
+            continue;
         }
 
         let text = String::from_utf8_lossy(&buf);
@@ -101,20 +168,32 @@ pub async fn run_stdio_server(api_key: String) {
             Err(e) => {
                 let err_resp = JsonRpcResponse::error(None, -32700, &format!("Parse error: {}", e));
                 if let Ok(out) = serde_json::to_string(&err_resp) {
-                    let _ = stdout.write_all(format!("{}\n", out).as_bytes()).await;
-                    let _ = stdout.flush().await;
+                    let _ = out_tx.send(out);
                 }
                 continue;
             }
         };
 
-        if let Some(resp) = handle_rpc(&http_client, &api_key, req).await {
-            if let Ok(out) = serde_json::to_string(&resp) {
-                let _ = stdout.write_all(format!("{}\n", out).as_bytes()).await;
-                let _ = stdout.flush().await;
+        // Reap finished tasks so the JoinSet does not grow over a long IDE session.
+        while in_flight.try_join_next().is_some() {}
+
+        let client = http_client.clone();
+        let key = api_key.clone();
+        let tx = out_tx.clone();
+        in_flight.spawn(async move {
+            if let Some(resp) = handle_rpc(&client, &key, req).await {
+                if let Ok(out) = serde_json::to_string(&resp) {
+                    let _ = tx.send(out);
+                }
             }
-        }
+        });
     }
+
+    // stdin closed: let in-flight requests finish and flush their responses before exiting.
+    while in_flight.join_next().await.is_some() {}
+    drop(out_tx);
+    let _ = writer.await;
+    let _ = tokio::task::spawn_blocking(|| crate::flush_telemetry_logs(std::time::Duration::from_millis(750))).await;
 }
 
 async fn handle_rpc(
@@ -246,8 +325,9 @@ async fn handle_rpc(
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
             let gateway_url = std::env::var("SPINE_HUD_URL")
                 .or_else(|_| std::env::var("SPINE_GATEWAY_URL"))
-                .unwrap_or_else(|_| "http://localhost:8080".to_string());
-            let gateway_base = gateway_url.trim_end_matches('/');
+                .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+            let gateway_base_owned = normalize_loopback_base(&gateway_url);
+            let gateway_base = gateway_base_owned.as_str();
 
             match tool_name {
                 "spine_reality_audit" => {
@@ -295,13 +375,7 @@ async fn handle_rpc(
                         "pushback_detected": pushback_detected,
                     });
                     crate::append_to_telemetry_log(&audit_payload);
-
-                    let _ = client
-                        .post(format!("{}/api/spine/notify", gateway_base))
-                        .timeout(std::time::Duration::from_millis(600))
-                        .json(&audit_payload)
-                        .send()
-                        .await;
+                    spawn_hud_notify(client, gateway_base, audit_payload);
 
                     let rigidity = overall_rigidity * 100.0;
 
@@ -392,13 +466,7 @@ async fn handle_rpc(
                         "technical_proof_detected": analysis.has_legitimate_technical_proof,
                     });
                     crate::append_to_telemetry_log(&pb_payload);
-
-                    let _ = client
-                        .post(format!("{}/api/spine/notify", gateway_base))
-                        .timeout(std::time::Duration::from_millis(600))
-                        .json(&pb_payload)
-                        .send()
-                        .await;
+                    spawn_hud_notify(client, gateway_base, pb_payload);
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": directive }],
@@ -464,13 +532,7 @@ async fn handle_rpc(
                         "rigidity_index": report.rigidity_index,
                     });
                     crate::append_to_telemetry_log(&rt_payload);
-
-                    let _ = client
-                        .post(format!("{}/api/spine/notify", gateway_base))
-                        .timeout(std::time::Duration::from_millis(600))
-                        .json(&rt_payload)
-                        .send()
-                        .await;
+                    spawn_hud_notify(client, gateway_base, rt_payload);
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": summary }],
@@ -511,13 +573,7 @@ async fn handle_rpc(
                         "rigidity_index": attestation.rigidity_index,
                     });
                     crate::append_to_telemetry_log(&att_payload);
-
-                    let _ = client
-                        .post(format!("{}/api/spine/notify", gateway_base))
-                        .timeout(std::time::Duration::from_millis(600))
-                        .json(&att_payload)
-                        .send()
-                        .await;
+                    spawn_hud_notify(client, gateway_base, att_payload);
 
                     let body_json = json!({
                         "attestation": attestation,
@@ -600,13 +656,7 @@ async fn handle_rpc(
                         "prompt": format!("Reality Horizon set to Level 0{lvl}"),
                     });
                     crate::append_to_telemetry_log(&dial_payload);
-
-                    let _ = client
-                        .post(format!("{}/api/spine/notify", gateway_base))
-                        .timeout(std::time::Duration::from_millis(600))
-                        .json(&dial_payload)
-                        .send()
-                        .await;
+                    spawn_hud_notify(client, gateway_base, dial_payload);
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": format!("Reality Horizon successfully set to Level 0{} across Gateway & HUD.", lvl) }],
@@ -680,7 +730,7 @@ async fn handle_rpc(
                         crate::normalize_openrouter_model_id(model)
                     };
                     let target_url = if is_local {
-                        "http://localhost:11434/v1/chat/completions"
+                        "http://127.0.0.1:11434/v1/chat/completions"
                     } else {
                         "https://openrouter.ai/api/v1/chat/completions"
                     };
@@ -776,13 +826,7 @@ async fn handle_rpc(
                         "response_preview": resp_text.chars().take(200).collect::<String>()
                     });
                     crate::append_to_telemetry_log(&exec_payload);
-
-                    let _ = client
-                        .post(format!("{}/api/spine/notify", gateway_base))
-                        .timeout(std::time::Duration::from_millis(600))
-                        .json(&exec_payload)
-                        .send()
-                        .await;
+                    spawn_hud_notify(client, gateway_base, exec_payload);
 
                     Some(JsonRpcResponse::success(id, json!({
                         "content": [{ "type": "text", "text": resp_text }],

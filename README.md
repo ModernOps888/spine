@@ -1,8 +1,8 @@
 # 🛡️ SPINE: Biological-Cybernetic Anti-Sycophancy Reality Gateway & HUD
 
-[![Release: v1.4.0](https://img.shields.io/badge/Release-v1.4.0-emerald.svg)](https://github.com/ModernOps888/spine/releases/tag/v1.4.0)
+[![Release: v1.4.1](https://img.shields.io/badge/Release-v1.4.1-emerald.svg)](https://github.com/ModernOps888/spine/releases/tag/v1.4.1)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg?logo=rust)](https://www.rust-lang.org/)
-[![Tests: 59/59 Passed](https://img.shields.io/badge/Tests-59%2F59_Passed-brightgreen.svg)](https://github.com/ModernOps888/spine)
+[![Tests: 63/63 Passed](https://img.shields.io/badge/Tests-63%2F63_Passed-brightgreen.svg)](https://github.com/ModernOps888/spine)
 [![React](https://img.shields.io/badge/React-19.2-blue.svg?logo=react)](https://react.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-v4.3-38bdf8.svg?logo=tailwindcss)](https://tailwindcss.com/)
 [![MCP](https://img.shields.io/badge/MCP-Compliant-8A2BE2.svg)](https://modelcontextprotocol.io/)
@@ -23,7 +23,26 @@ We audited every module, function, and hot-path loop in SPINE line by line. Here
 - **Catches Fake Formal Proofs (`T3` / `T6` Proof-Sycophancy Guard):** Models can no longer bluff past formal verification by slipping `sorry`, `admit`, `sorryAx`, `Admitted.`, `todo!()`, or `unimplemented!()` into Lean 4, Coq, or Rust proofs while claiming a theorem is proven.
 - **KLS Spectral Backbone Rigidity:** Integrates the October 2026 Kannan–Lovász–Simonovits (KLS) Cheeger–Poincaré spectral concentration bound ($\Delta_{\text{KLS}}$) into `S1` Choquet rigidity (`compute_backbone_rigidity`) and incorporates `T9` (Adversarial Refusal Guard) into the synergy lattice.
 - **Smarter Multi-Turn Context (`C6` & `T4`):** Saying *"I'm new to machine learning, explain simply"* is recognized as legitimate learning context rather than credential intimidation, and `T4` pushback locks now decay naturally on neutral follow-up turns instead of staying stuck for the rest of a session.
-- **86.3% Smaller Telemetry Logs & Instant HUD Startup:** `logs/telemetry.jsonl` and `logs/post_training_pairs.jsonl` now auto-rotate at `50 MB`, `/api/spine/logs` uses a fast `256 KB` reverse-tail reader that compacts legacy rows on the fly, and the React 19 HUD deduplicates initial history hydration.
+- **86.3% Smaller Telemetry Logs & Instant HUD Startup:** `logs/telemetry.jsonl` and `logs/post_training_pairs.jsonl` now auto-rotate at `10 MB`, `/api/spine/logs` uses a fast `256 KB` reverse-tail reader that compacts legacy rows on the fly, and the React 19 HUD deduplicates initial history hydration.
+
+---
+
+## ⚡ What's New in v1.4.1 — Turn-Latency & Stream-Coherence Audit
+
+A focused audit of everything that sits between your prompt and the first token. Every number below was measured on the release binary with a JSON-RPC stdio harness (100 calls) and the end-to-end streaming tests in `src/main.rs`.
+
+| Defect found | Impact before | After v1.4.1 |
+|:---|:---|:---|
+| **MCP head-of-line blocking** — stdio requests were processed strictly one at a time | A 1 ms `spine_reality_audit` waited **2,336 ms** behind a slow `spine_execute_grounded_reality` | **0.95 ms** (concurrent dispatch + single ordered stdout writer) |
+| **Awaited HUD telemetry POST** on every tool call (600 ms timeout, `localhost` → IPv6 `::1` fallback on Windows) | Avg `spine_reality_audit` **9.67 ms**, max **313.8 ms** | Avg **0.98 ms**, P95 **1.76 ms** (fire-and-forget, `127.0.0.1`) |
+| **Total 120 s request timeout on the upstream client** also bounded the streamed body | Long reasoning streams cut off mid-sentence at 120 s | `connect_timeout(10s)` + idle `read_timeout(120s)`: streams run as long as tokens keep arriving |
+| **`finish_reason` overtook buffered text**; frames with `content: ""` + `finish_reason` / `usage` were dropped | Short answers (< 48 chars) arrived after the stop signal; usage frames silently lost | Buffered text and tail window flushed first; metadata frames always forwarded, in order |
+| **`"reasoning": null` bypass** — OpenRouter sends this on every visible chunk, and JSON `null` counted as a reasoning channel | All visible text skipped the cushion/apology sanitizer | Only non-empty reasoning fields are exempt; mixed frames are split |
+| **ChronoFact pre-check with no circuit breaker** | Every chat turn paid the connect timeout while ChronoFact was offline | 400 ms cap + 30 s breaker after a failure |
+| **Telemetry disk writes on Tokio workers** | File I/O / AV scans stalled request handling | Dedicated FIFO `spine-log-writer` thread, flushed on MCP shutdown |
+| **Unbounded stdin frame reads** | One malformed oversized frame could desync the stream | 16 MB cap with drain-to-newline and a JSON-RPC `-32600` error |
+
+New regression tests: `short_answer_precedes_finish_reason_and_usage_is_never_dropped`, `null_reasoning_field_does_not_bypass_cushion_sanitizer`, `real_reasoning_channel_is_forwarded_untouched`, `loopback_normalization_avoids_ipv6_fallback`. Optional: `SPINE_OLLAMA_URL` overrides the local Ollama base URL (default `http://127.0.0.1:11434`).
 
 ---
 
@@ -271,7 +290,7 @@ Frontier reasoning models emit scratchpad thinking through fundamentally distinc
 
 ### 7. Choquet Capacity + KLS Spectral Backbone Rigidity & Post-Training Anti-Sycophancy Flywheel
 - **Choquet Capacity + KLS Cheeger–Poincaré Spectral Concentration (`compute_backbone_rigidity`):** Computes non-additive Choquet synergy across co-activated defensive vertebrae (`C2`, `C4`, `C5`, `C6`, `T2`, `T4`, `T9`) plus a KLS Cheeger–Poincaré spectral concentration factor ($\Delta_{\text{KLS}}(x) = \frac{0.002}{4\psi_d^2}\bar{x}(1 - \text{Var}(x))$) above the Reality Dial baseline (`0.25`, `0.65`, `0.88`, `0.99`) while guaranteeing all inactive vertebrae satisfy `score <= 0.25` (zero inactive score inversions).
-- **Compact Telemetry, Reverse-Tail Log Reader & Post-Training Preference Flywheel (`SPINE-13`, `SPINE-17`):** Serializes compact `active_vertebra_ids` telemetry rows under a process-wide `LOG_WRITE_LOCK` (`Mutex<()>`) with `50 MB` rotation (`LOG_ROTATE_BYTES`) across both `logs/telemetry.jsonl` and `logs/post_training_pairs.jsonl`, and serves `/api/spine/logs` via a bounded `256 KB` tail reader with on-the-fly legacy compaction.
+- **Compact Telemetry, Reverse-Tail Log Reader & Post-Training Preference Flywheel (`SPINE-13`, `SPINE-17`):** Serializes compact `active_vertebra_ids` telemetry rows on a dedicated FIFO `spine-log-writer` thread (disk I/O never runs on a Tokio worker; a process-wide `LOG_WRITE_LOCK` guards rotation) with `10 MB` rotation (`LOG_ROTATE_BYTES`) across both `logs/telemetry.jsonl` and `logs/post_training_pairs.jsonl`, and serves `/api/spine/logs` via a bounded `256 KB` tail reader with on-the-fly legacy compaction.
 
 ### 8. Enterprise Adversarial Red-Team Engine, Negation Guards & Complete HMAC-SHA256 Gate Attestation
 - Stress-tests architecture documents and PR descriptions against L1–L5, S1–S5, and T1–T12 invariants with negation-aware pattern matching (`contains_unnegated`, preventing false positives on defensive statements such as *"we will not use `eval()`"*) and formal proof soundness auditing (`detect_fake_proof_or_unproved_lemma`), escalating `MEDIUM` (`L2`) violations to `REVISE` at Level 4 Brutal Reality.
@@ -363,12 +382,14 @@ Authored by an isolated blind subagent with zero access to SPINE source code, te
 | **SP-1: Multi-Turn Pushback Arbitrator (`T1`/`T3`/`T7`)** (frustrated senior-dev bug reports vs. credential intimidation) | 24 | `50.0%` / `100.0%` / `0.0%` | `79.2%` / `58.3%` / `100.0%` | **`100.0%` / `100.0%` / `100.0%`** | `14.92ms` |
 | **SP-2: Adversarial Red-Team PR Gate (`T6`/`T9`/`L2`/`L4`/`L5`/`S4`)** (flawed PRs vs. lock-guard, `DELETE /` route, and `checked_add`/`AbortController` clean PRs) | 20 | `50.0%` / `0.0%` / `100.0%` | `55.0%` / `70.0%` / `40.0%` | **`100.0%` / `100.0%` / `100.0%`** | `4.02ms` |
 
-### 3. Core Verification & Invariant Suite (`59 / 59` Rust Tests + `18 / 18` Live System Checks)
+### 3. Core Verification & Invariant Suite (`63 / 63` Rust Tests + `18 / 18` Live System Checks)
 
 | Verification Vector | Result | Architectural Invariant |
 |:---|:---:|:---|
-| **Rust Gateway Unit & Invariant Tests** | **59 / 59 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
-| **Live 100-Audit Engine Benchmark (`deep_audit_assessment.ps1`)** | **1.57 ms Avg (`614.8 req/s`)** | P95: `2.63 ms`, Min: `1.04 ms`, `18/18` live checks & `33/33` vertebrae active |
+| **Rust Gateway Unit & Invariant Tests** | **63 / 63 PASSING** | `cargo test` (100% pass rate, 0 warnings, 0 failures) |
+| **End-to-End Stream Ordering (mock upstream → gateway → client)** | **4 / 4 PASSING** | `streaming_order_tests` in `src/main.rs` |
+| **MCP Stdio Latency (100 calls, release build)** | **0.98 ms Avg / 1.76 ms P95** | Fast call behind a 2 s slow call answered in `0.95 ms` |
+| **Live 100-Audit Engine Benchmark (`deep_audit_assessment.ps1`)** | **1.59 ms Avg (`607.4 req/s`)** | P95: `2.32 ms`, Min: `1.00 ms`, `18/18` live checks & `33/33` vertebrae active (v1.4.1 run) |
 | **KLS Spectral, Proof-Sycophancy (`sorry`/`admit`) & Negation Guards** | **100% Verified** | Verified in `test_kls_spectral_proof_sycophancy_and_negation_guards` |
 | **Blind Held-Out SWE Benchmark** | **100 / 100 PASSING (100%)** | Verified in `test_spine_blind_heldout_benchmark` (`SP-1` & `SP-2`, SHA-256 frozen in `backend/tests/heldout/MANIFEST.md`) |
 | **In-Sample SWE Rigorous Benchmark** | **44 / 44 PASSING (100%)** | Verified in `test_spine_swe_rigorous_benchmark` (`SP-1` & `SP-2`) |

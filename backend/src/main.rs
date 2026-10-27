@@ -73,6 +73,16 @@ pub fn normalize_openrouter_model_id(model: &str) -> String {
     }
 }
 
+/// Local Ollama OpenAI-compatible endpoint. Defaults to `http://127.0.0.1:11434`; override the base
+/// with `SPINE_OLLAMA_URL` (e.g. a remote GPU box). `localhost` is normalized to `127.0.0.1`.
+pub fn ollama_chat_completions_url() -> String {
+    let base = std::env::var("SPINE_OLLAMA_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+    format!("{}/v1/chat/completions", mcp::normalize_loopback_base(&base))
+}
+
 fn build_app_router(state: Arc<AppState>) -> Router {
     // Only the local HUD may call the gateway cross-origin.
     let allowed_origins: Vec<axum::http::HeaderValue> = [
@@ -135,8 +145,14 @@ async fn main() {
     let state = Arc::new(AppState {
         openrouter_api_key: openrouter_key.clone(),
         chronofact_url: chronofact_url.clone(),
+        // `connect_timeout` + per-read idle `read_timeout` instead of a total request timeout:
+        // a total `.timeout(120s)` also bounds the streamed body, silently truncating long
+        // reasoning/SSE generations mid-sentence. Idle reads still fail fast on a stalled upstream.
         http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_nodelay(true)
             .build()
             .unwrap(),
         tx,
@@ -428,6 +444,9 @@ async fn audit_spine_handler(
 }
 
 static EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Epoch-ms until which the ChronoFact pre-check is skipped after a connection failure.
+static CF_BREAKER_UNTIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const CF_BREAKER_COOLDOWN_MS: u64 = 30_000;
 static LOG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const LOG_KEEP_FILES: usize = 3;
@@ -466,12 +485,9 @@ fn rotate_telemetry_log(log_dir: &std::path::Path) {
 }
 
 pub fn append_to_telemetry_log(event: &serde_json::Value) {
-    let _guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let log_dir = telemetry_log_dir();
-    if !log_dir.exists() {
-        let _ = std::fs::create_dir_all(&log_dir);
-    }
-    rotate_telemetry_log(&log_dir);
+    // Serialize on the caller (cheap, CPU-only); hand the disk write to the dedicated log writer
+    // thread so request handlers and MCP tool calls never block a Tokio worker on file I/O,
+    // antivirus scans, or rotation renames.
     // Compact disk serialization: replace 33-element vertebrae description array with active_vertebra_ids
     // and round f32 telemetry metrics to 4 decimal places.
     let mut disk_event = event.clone();
@@ -499,32 +515,85 @@ pub fn append_to_telemetry_log(event: &serde_json::Value) {
             }
         }
     }
-    let log_file = log_dir.join("telemetry.jsonl");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_file) {
-        use std::io::Write;
-        if let Ok(json_str) = serde_json::to_string(&disk_event) {
-            let _ = writeln!(file, "{}", json_str);
-        }
+    if let Ok(json_str) = serde_json::to_string(&disk_event) {
+        submit_log_job(LogJob::Telemetry(json_str));
     }
 }
 
-/// Appends a verified `(prompt, chosen, rejected)` preference pair to `post_training_pairs.jsonl`
-/// whenever SPINE strips sycophantic cushions or unearned apologies from an assistant response.
-pub fn append_post_training_pair(pair: &serde_json::Value) {
+/// Disk write jobs executed in FIFO order by the dedicated `spine-log-writer` thread.
+enum LogJob {
+    Telemetry(String),
+    TrainingPair(String),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+static LOG_TX: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<LogJob>>> = std::sync::OnceLock::new();
+
+fn write_log_job_sync(job: LogJob) {
+    use std::io::Write;
     let _guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let log_dir = telemetry_log_dir();
     if !log_dir.exists() {
         let _ = std::fs::create_dir_all(&log_dir);
     }
-    let pair_file = log_dir.join("post_training_pairs.jsonl");
-    if std::fs::metadata(&pair_file).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
-        let _ = std::fs::rename(&pair_file, log_dir.join("post_training_pairs.1.jsonl"));
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(pair_file) {
-        use std::io::Write;
-        if let Ok(json_str) = serde_json::to_string(pair) {
-            let _ = writeln!(file, "{}", json_str);
+    match job {
+        LogJob::Telemetry(line) => {
+            rotate_telemetry_log(&log_dir);
+            let log_file = log_dir.join("telemetry.jsonl");
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_file) {
+                let _ = writeln!(file, "{}", line);
+            }
         }
+        LogJob::TrainingPair(line) => {
+            let pair_file = log_dir.join("post_training_pairs.jsonl");
+            if std::fs::metadata(&pair_file).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
+                let _ = std::fs::rename(&pair_file, log_dir.join("post_training_pairs.1.jsonl"));
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(pair_file) {
+                let _ = writeln!(file, "{}", line);
+            }
+        }
+        LogJob::Flush(ack) => {
+            let _ = ack.send(());
+        }
+    }
+}
+
+fn submit_log_job(job: LogJob) {
+    let tx = LOG_TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<LogJob>();
+        let spawned = std::thread::Builder::new()
+            .name("spine-log-writer".to_string())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    write_log_job_sync(job);
+                }
+            });
+        if spawned.is_err() {
+            warn!("Failed to spawn SPINE log writer thread; telemetry writes will be dropped");
+        }
+        std::sync::Mutex::new(tx)
+    });
+    let send_result = tx.lock().unwrap_or_else(|e| e.into_inner()).send(job);
+    if let Err(std::sync::mpsc::SendError(job)) = send_result {
+        // Writer thread unavailable: fall back to a synchronous write rather than losing data.
+        write_log_job_sync(job);
+    }
+}
+
+/// Blocks (up to `timeout`) until every previously submitted telemetry / training-pair write
+/// has reached disk. Called on MCP shutdown so the final turn's audit is never lost.
+pub fn flush_telemetry_logs(timeout: std::time::Duration) {
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    submit_log_job(LogJob::Flush(ack_tx));
+    let _ = ack_rx.recv_timeout(timeout);
+}
+
+/// Appends a verified `(prompt, chosen, rejected)` preference pair to `post_training_pairs.jsonl`
+/// whenever SPINE strips sycophantic cushions or unearned apologies from an assistant response.
+pub fn append_post_training_pair(pair: &serde_json::Value) {
+    if let Ok(json_str) = serde_json::to_string(pair) {
+        submit_log_job(LogJob::TrainingPair(json_str));
     }
 }
 
@@ -767,19 +836,30 @@ async fn chat_completions_handler(
     }
 
     // Zero-Config Pipeline Middleware: Transparently queries ChronoFact (:3030)
-    if let Some(ref cf_url) = state.chronofact_url {
-        let endpoint = format!("{}/api/temporal/check", cf_url.trim_end_matches('/'));
+    // Guarded by a 30s circuit breaker: when ChronoFact is offline, every chat turn would otherwise
+    // pay the full connect timeout (Windows retries refused loopback SYNs for ~1-2s) before TTFT.
+    let cf_now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let cf_breaker_open = CF_BREAKER_UNTIL_MS.load(std::sync::atomic::Ordering::Relaxed) > cf_now_ms;
+    if let Some(cf_url) = state.chronofact_url.as_ref().filter(|_| !cf_breaker_open) {
+        let endpoint = format!("{}/api/temporal/check", mcp::normalize_loopback_base(cf_url));
         let cf_payload = json!({
             "model_id": req.model,
             "query": prompt_text,
         });
 
-        if let Ok(cf_res) = state.http_client
+        let cf_result = state.http_client
             .post(&endpoint)
             .json(&cf_payload)
-            .timeout(std::time::Duration::from_millis(500))
+            .timeout(std::time::Duration::from_millis(400))
             .send()
-            .await
+            .await;
+        if cf_result.is_err() {
+            CF_BREAKER_UNTIL_MS.store(cf_now_ms + CF_BREAKER_COOLDOWN_MS, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Ok(cf_res) = cf_result
         {
             if cf_res.status().is_success() {
                 if let Ok(cf_body) = cf_res.json::<serde_json::Value>().await {
@@ -848,7 +928,7 @@ async fn chat_completions_handler(
     // All providers flow through the identical SPINE Phase 1 + ReasoningDemuxer + Phase 2 StreamTailSanitizer pipeline.
     let (target_url, dispatch_model_id, is_local_provider) = if is_ollama {
         (
-            "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+            ollama_chat_completions_url(),
             model_id.trim_start_matches("ollama/").to_string(),
             true,
         )
@@ -1139,18 +1219,89 @@ async fn chat_completions_handler(
                                     }
                                 }
 
-                                // CoT Exemption Boundary 1: Dedicated provider thought channels
-                                let has_reasoning_channel = parsed.pointer("/choices/0/delta/reasoning_content").is_some()
-                                    || parsed.pointer("/choices/0/delta/thought").is_some()
-                                    || parsed.pointer("/choices/0/delta/reasoning").is_some()
-                                    || parsed.pointer("/choices/0/delta/thinking").is_some()
-                                    || parsed.pointer("/delta/thinking").is_some()
+                                // CoT Exemption Boundary 1: Dedicated provider thought channels.
+                                // A field counts only when it carries actual reasoning text: OpenRouter emits
+                                // `"reasoning": null` on every visible chunk, and `pointer(..).is_some()` is true
+                                // for JSON null, which previously routed ALL visible text around the sanitizer.
+                                let carries_text = |v: &serde_json::Value| match v {
+                                    serde_json::Value::Null => false,
+                                    serde_json::Value::String(s) => !s.is_empty(),
+                                    serde_json::Value::Array(a) => !a.is_empty(),
+                                    _ => true,
+                                };
+                                let reasoning_ptrs = [
+                                    "/choices/0/delta/reasoning_content",
+                                    "/choices/0/delta/thought",
+                                    "/choices/0/delta/reasoning",
+                                    "/choices/0/delta/thinking",
+                                    "/choices/0/delta/reasoning_details",
+                                    "/delta/thinking",
+                                ];
+                                let has_reasoning_channel = reasoning_ptrs
+                                    .iter()
+                                    .any(|p| parsed.pointer(p).map(|v| carries_text(v)).unwrap_or(false))
                                     || parsed.get("type").and_then(|t| t.as_str()) == Some("thinking_delta")
                                     || parsed.pointer("/delta/type").and_then(|t| t.as_str()) == Some("thinking_delta");
+                                let has_visible_text = parsed
+                                    .pointer("/choices/0/delta/content")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| !s.is_empty())
+                                    .unwrap_or(false);
 
-                                if has_reasoning_channel {
+                                if has_reasoning_channel && !has_visible_text {
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
                                     continue;
+                                }
+                                if has_reasoning_channel && has_visible_text {
+                                    // Mixed frame: forward the reasoning untouched, then sanitize the visible text alone.
+                                    let mut thought_only = parsed.clone();
+                                    if let Some(d) = thought_only.pointer_mut("/choices/0/delta").and_then(|d| d.as_object_mut()) {
+                                        d.remove("content");
+                                    }
+                                    if let Some(choice) = thought_only.pointer_mut("/choices/0").and_then(|c| c.as_object_mut()) {
+                                        choice.insert("finish_reason".to_string(), serde_json::Value::Null);
+                                    }
+                                    if let Some(obj) = thought_only.as_object_mut() {
+                                        obj.remove("usage");
+                                    }
+                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(thought_only.to_string()));
+                                    if let Some(d) = parsed.pointer_mut("/choices/0/delta").and_then(|d| d.as_object_mut()) {
+                                        for key in ["reasoning_content", "thought", "reasoning", "thinking", "reasoning_details"] {
+                                            d.remove(key);
+                                        }
+                                    }
+                                }
+
+                                // Stream-order invariant: metadata (finish_reason / usage / tool_calls) must never
+                                // overtake visible text still held in the Phase 1 micro-buffer or the 128-byte
+                                // tail-sanitizer window, and must never be dropped when the drained text is empty.
+                                // Previously a short answer (< 48 chars) arrived AFTER `finish_reason: "stop"`, and a
+                                // final `{"content":"", "finish_reason":"stop"}` / usage frame was silently discarded.
+                                let finish_reason_set = parsed
+                                    .pointer("/choices/0/finish_reason")
+                                    .map(|v| !v.is_null())
+                                    .unwrap_or(false);
+                                let has_usage = parsed.get("usage").map(|u| !u.is_null()).unwrap_or(false);
+                                let has_tool_calls = parsed
+                                    .pointer("/choices/0/delta/tool_calls")
+                                    .map(|v| carries_text(v))
+                                    .unwrap_or(false);
+                                let mut pending_meta: Option<serde_json::Value> = None;
+                                if finish_reason_set || has_usage || has_tool_calls {
+                                    let mut meta = parsed.clone();
+                                    if let Some(d) = meta.pointer_mut("/choices/0/delta").and_then(|d| d.as_object_mut()) {
+                                        d.remove("content");
+                                    }
+                                    if let Some(choice) = parsed.pointer_mut("/choices/0").and_then(|c| c.as_object_mut()) {
+                                        choice.insert("finish_reason".to_string(), serde_json::Value::Null);
+                                        if let Some(d) = choice.get_mut("delta").and_then(|d| d.as_object_mut()) {
+                                            d.remove("tool_calls");
+                                        }
+                                    }
+                                    if let Some(obj) = parsed.as_object_mut() {
+                                        obj.remove("usage");
+                                    }
+                                    pending_meta = Some(meta);
                                 }
 
                                 // CoT Exemption Boundary 2: 3-State Sliding Window Demuxer for Inline Reasoning Tags
@@ -1158,6 +1309,7 @@ async fn chat_completions_handler(
                                     .pointer("/choices/0/delta/content")
                                     .or_else(|| parsed.pointer("/message/content"))
                                     .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
                                     .map(|s| s.to_string());
                                 if let Some(ref content) = delta_content_opt {
                                     let demux_res = reasoning_demuxer.process_delta(content);
@@ -1224,8 +1376,68 @@ async fn chat_completions_handler(
                                             }
                                         }
                                     }
-                                } else {
+                                } else if pending_meta.is_none() {
+                                    // Role-only / empty-content frames carry no visible text: forward as-is.
                                     yield Ok::<Event, std::convert::Infallible>(Event::default().data(parsed.to_string()));
+                                }
+
+                                if let Some(meta) = pending_meta.take() {
+                                    // 1. Release any Phase 1 micro-buffer (short answers, role frame) ahead of metadata.
+                                    if filter_active && (!buffered_chunks.is_empty() || !buffered_text.is_empty()) {
+                                        let safe_idx = buffered_text.floor_char_boundary(buffered_text.len());
+                                        let orig_chars = buffered_text[..safe_idx].chars().count();
+                                        let (sanitized, intercepted) = strip_initial_cushions(&buffered_text[..safe_idx]);
+                                        if intercepted {
+                                            phase1_intercepted_any = true;
+                                        }
+                                        let sanitized_chars = sanitized.chars().count();
+                                        if orig_chars > sanitized_chars {
+                                            let diff = orig_chars - sanitized_chars;
+                                            phase1_token_delta -= ((diff as f64) / 3.8).round().max(1.0) as i64;
+                                        }
+                                        let drained = tail_sanitizer.push_and_drain(&sanitized);
+                                        if !drained.is_empty() {
+                                            clean_visible_accum.push_str(&drained);
+                                        }
+                                        if let Some(first) = buffered_chunks.first_mut() {
+                                            if let Some(target) = first.pointer_mut("/choices/0/delta/content") {
+                                                *target = serde_json::Value::String(drained);
+                                            }
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(first.to_string()));
+                                        } else if !drained.is_empty() {
+                                            let flush_evt = json!({
+                                                "id": "chatcmpl-spine-phase1-flush",
+                                                "object": "chat.completion.chunk",
+                                                "choices": [{
+                                                    "delta": { "content": drained },
+                                                    "index": 0,
+                                                    "finish_reason": null
+                                                }]
+                                            });
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(flush_evt.to_string()));
+                                        }
+                                        buffered_chunks.clear();
+                                        buffered_text.clear();
+                                        filter_active = false;
+                                    }
+                                    // 2. Release the tail-sanitizer lookahead before the turn ends or a tool call starts.
+                                    if finish_reason_set || has_tool_calls {
+                                        if let Some(tail_text) = tail_sanitizer.flush_final_chunk() {
+                                            clean_visible_accum.push_str(&tail_text);
+                                            let tail_evt = json!({
+                                                "id": "chatcmpl-spine-tail",
+                                                "object": "chat.completion.chunk",
+                                                "choices": [{
+                                                    "delta": { "content": tail_text },
+                                                    "index": 0,
+                                                    "finish_reason": null
+                                                }]
+                                            });
+                                            yield Ok::<Event, std::convert::Infallible>(Event::default().data(tail_evt.to_string()));
+                                        }
+                                    }
+                                    // 3. Metadata frame last, never dropped.
+                                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(meta.to_string()));
                                 }
                             }
                         }
@@ -1518,4 +1730,173 @@ async fn verify_attestation_spine_handler(
         "attestation_id": payload.attestation.attestation_id,
         "verdict": payload.attestation.verdict,
     }))
+}
+
+#[cfg(test)]
+mod streaming_order_tests {
+    use super::*;
+
+    /// Serializes tests that mutate process-wide env vars (`SPINE_OLLAMA_URL`, `SPINE_LOG_DIR`).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Spawns a mock OpenAI-compatible upstream that replays `frames` as an SSE body.
+    async fn spawn_mock_upstream(frames: Vec<String>) -> SocketAddr {
+        let body: String = frames.iter().map(|f| format!("data: {}\n\n", f)).collect();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let body = body.clone();
+                async move {
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    async fn spawn_gateway() -> SocketAddr {
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            openrouter_api_key: String::new(),
+            chronofact_url: None,
+            http_client: reqwest::Client::new(),
+            tx,
+            recent_events: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            active_reality_level: Arc::new(std::sync::atomic::AtomicU8::new(4)),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, build_app_router(state)).await;
+        });
+        addr
+    }
+
+    /// Runs one streamed chat turn through the real gateway pipeline and returns the parsed
+    /// `data:` frames in arrival order (excluding the `spine_telemetry` event and `[DONE]`).
+    async fn run_stream(frames: Vec<String>) -> Vec<serde_json::Value> {
+        let upstream = spawn_mock_upstream(frames).await;
+        std::env::set_var("SPINE_OLLAMA_URL", format!("http://127.0.0.1:{}", upstream.port()));
+        std::env::set_var("SPINE_LOG_DIR", std::env::temp_dir().join("spine_stream_order_tests"));
+        let gateway = spawn_gateway().await;
+        let body = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/chat/completions", gateway.port()))
+            .json(&json!({
+                "model": "ollama/mock",
+                "stream": true,
+                "messages": [{ "role": "user", "content": "Is 7 prime?" }]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        let mut current_event = String::new();
+        for line in body.lines() {
+            if let Some(ev) = line.strip_prefix("event:") {
+                current_event = ev.trim().to_string();
+                continue;
+            }
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim();
+                if current_event != "spine_telemetry" && data != "[DONE]" {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                        out.push(v);
+                    }
+                }
+                current_event.clear();
+            }
+        }
+        out
+    }
+
+    fn visible_text(frames: &[serde_json::Value]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| f.pointer("/choices/0/delta/content").and_then(|c| c.as_str()))
+            .collect()
+    }
+
+    fn index_of(frames: &[serde_json::Value], pred: impl Fn(&serde_json::Value) -> bool) -> Option<usize> {
+        frames.iter().position(pred)
+    }
+
+    #[tokio::test]
+    async fn short_answer_precedes_finish_reason_and_usage_is_never_dropped() {
+        let _guard = ENV_LOCK.lock().await;
+        let frames = vec![
+            r#"{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#.to_string(),
+            r#"{"id":"c1","choices":[{"index":0,"delta":{"content":"Yes"},"finish_reason":null}]}"#.to_string(),
+            r#"{"id":"c1","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}"#.to_string(),
+            r#"{"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        let out = run_stream(frames).await;
+
+        assert_eq!(visible_text(&out), "Yes", "visible text must be delivered intact: {:?}", out);
+        let text_idx = index_of(&out, |f| f.pointer("/choices/0/delta/content").and_then(|c| c.as_str()) == Some("Yes"))
+            .expect("short answer frame missing");
+        let finish_idx = index_of(&out, |f| f.pointer("/choices/0/finish_reason").and_then(|c| c.as_str()) == Some("stop"))
+            .expect("finish_reason frame was dropped");
+        let usage_idx = index_of(&out, |f| f.get("usage").map(|u| !u.is_null()).unwrap_or(false))
+            .expect("usage frame was dropped");
+        assert!(text_idx < finish_idx, "finish_reason overtook buffered text: {:?}", out);
+        assert!(finish_idx < usage_idx, "usage must follow finish_reason: {:?}", out);
+        assert_eq!(out[usage_idx]["usage"]["upstream_completion_tokens"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn null_reasoning_field_does_not_bypass_cushion_sanitizer() {
+        let _guard = ENV_LOCK.lock().await;
+        let frames = vec![
+            r#"{"id":"c2","choices":[{"index":0,"delta":{"content":"Certainly! ","reasoning":null},"finish_reason":null}]}"#.to_string(),
+            r#"{"id":"c2","choices":[{"index":0,"delta":{"content":"7 is prime because its only divisors are 1 and 7.","reasoning":null},"finish_reason":null}]}"#.to_string(),
+            r#"{"id":"c2","choices":[{"index":0,"delta":{"content":"","reasoning":null},"finish_reason":"stop"}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        let out = run_stream(frames).await;
+        let text = visible_text(&out);
+        assert!(!text.contains("Certainly"), "cushion leaked through null-reasoning bypass: {:?}", text);
+        assert!(text.contains("7 is prime because its only divisors are 1 and 7."), "content lost: {:?}", text);
+        let finish_idx = index_of(&out, |f| f.pointer("/choices/0/finish_reason").and_then(|c| c.as_str()) == Some("stop"))
+            .expect("finish_reason frame was dropped");
+        let last_text_idx = out
+            .iter()
+            .rposition(|f| f.pointer("/choices/0/delta/content").and_then(|c| c.as_str()).map(|s| !s.is_empty()).unwrap_or(false))
+            .unwrap();
+        assert!(last_text_idx < finish_idx, "tail-sanitizer text emitted after finish_reason: {:?}", out);
+    }
+
+    #[tokio::test]
+    async fn real_reasoning_channel_is_forwarded_untouched() {
+        let _guard = ENV_LOCK.lock().await;
+        let frames = vec![
+            r#"{"id":"c3","choices":[{"index":0,"delta":{"content":"","reasoning":"Certainly! checking divisors"},"finish_reason":null}]}"#.to_string(),
+            r#"{"id":"c3","choices":[{"index":0,"delta":{"content":"7 is prime.","reasoning":null},"finish_reason":"stop"}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        let out = run_stream(frames).await;
+        let reasoning_forwarded = out.iter().any(|f| {
+            f.pointer("/choices/0/delta/reasoning").and_then(|r| r.as_str()) == Some("Certainly! checking divisors")
+        });
+        assert!(reasoning_forwarded, "reasoning channel must pass through unmodified: {:?}", out);
+        assert_eq!(visible_text(&out), "7 is prime.");
+    }
+
+    #[test]
+    fn loopback_normalization_avoids_ipv6_fallback() {
+        assert_eq!(mcp::normalize_loopback_base("http://localhost:8080/"), "http://127.0.0.1:8080");
+        assert_eq!(mcp::normalize_loopback_base("http://[::1]:3030"), "http://127.0.0.1:3030");
+        assert_eq!(mcp::normalize_loopback_base("https://api.example.com"), "https://api.example.com");
+    }
 }
