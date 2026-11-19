@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "spine-gateway"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "aho-corasick",
  "async-stream",

@@ -114,8 +114,306 @@ fn build_app_router(state: Arc<AppState>) -> Router {
         .route("/api/spine/attest", post(attest_spine_handler))
         .route("/api/spine/verify-attestation", post(verify_attestation_spine_handler))
         .layer(cors)
+        .layer(axum::middleware::from_fn(security_headers_middleware))
         .layer(axum::middleware::from_fn(loopback_host_guard))
         .with_state(state)
+}
+
+/// Validates HTTP `Host` header strictly against loopback literals with optional numeric port.
+pub fn is_valid_loopback_host(host: &str) -> bool {
+    let trimmed = host.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("[::1]") {
+        if trimmed == "[::1]" {
+            return true;
+        }
+        if let Some(rest) = trimmed.strip_prefix("[::1]:") {
+            return !rest.is_empty() && rest.parse::<u16>().is_ok();
+        }
+        return false;
+    }
+    if let Some((name, port)) = trimmed.split_once(':') {
+        matches!(name, "localhost" | "127.0.0.1") && !port.is_empty() && port.parse::<u16>().is_ok()
+    } else {
+        matches!(trimmed.as_str(), "localhost" | "127.0.0.1")
+    }
+}
+
+async fn security_headers_middleware(
+    req: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-frame-options"),
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("referrer-policy"),
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    resp
+}
+
+fn is_placeholder_secret_value(val: &str) -> bool {
+    let up = val.trim().to_ascii_uppercase();
+    up.is_empty()
+        || up.starts_with("<")
+        || up.starts_with("${")
+        || up.starts_with("$")
+        || up.contains("[REDACTED")
+        || up.contains("YOUR_")
+        || up.contains("REPLACE_ME")
+        || up.contains("EXAMPLE")
+        || up.contains("DUMMY")
+        || up.contains("FAKE")
+        || up.contains("CHANGE_ME")
+        || up.contains("TEST_KEY")
+}
+
+/// Pure-Rust secret redactor applied before writing telemetry, DPO pairs, or broadcasting HUD events.
+pub fn redact_secrets(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    // Pass 1: PEM private key blocks
+    let mut work = input.to_string();
+    loop {
+        let up = work.to_ascii_uppercase();
+        let Some(begin_idx) = up.find("-----BEGIN ") else {
+            break;
+        };
+        let Some(priv_rel) = up[begin_idx..].find("PRIVATE KEY-----") else {
+            break;
+        };
+        let after_header = begin_idx + priv_rel + "PRIVATE KEY-----".len();
+        let end_idx = up[after_header..]
+            .find("-----END ")
+            .and_then(|end_rel| {
+                let tail = after_header + end_rel;
+                up[tail..]
+                    .find("PRIVATE KEY-----")
+                    .map(|k_rel| tail + k_rel + "PRIVATE KEY-----".len())
+            })
+            .unwrap_or(work.len());
+        if !work.is_char_boundary(begin_idx) || !work.is_char_boundary(end_idx) {
+            break;
+        }
+        work.replace_range(begin_idx..end_idx, "[REDACTED_PEM_KEY]");
+    }
+
+    // Pass 2: Structured provider API tokens & JWTs
+    let bytes = work.as_bytes();
+    let mut out = String::with_capacity(work.len());
+    let mut i = 0usize;
+    let mut last_copied = 0usize;
+
+    let token_prefixes: &[(&str, usize, bool)] = &[
+        ("github_pat_", 24, false),
+        ("sk-or-v1-", 24, false),
+        ("sk-proj-", 20, false),
+        ("sk-ant-", 20, false),
+        ("sk_live_", 20, false),
+        ("rk_live_", 20, false),
+        ("glpat-", 18, false),
+        ("xoxb-", 18, false),
+        ("xoxp-", 18, false),
+        ("xoxa-", 18, false),
+        ("xoxr-", 18, false),
+        ("xoxs-", 18, false),
+        ("ghp_", 18, false),
+        ("gho_", 18, false),
+        ("ghu_", 18, false),
+        ("ghs_", 18, false),
+        ("AIza", 30, false),
+        ("AKIA", 20, true),
+        ("sk-", 23, false),
+        ("eyJ", 30, false),
+    ];
+
+    while i < bytes.len() {
+        if !bytes[i].is_ascii() {
+            let ch = work[i..].chars().next().map_or(1, |c| c.len_utf8());
+            i += ch;
+            continue;
+        }
+
+        let left_boundary = i == 0
+            || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
+
+        if left_boundary {
+            let mut matched_len = 0usize;
+            let mut replacement: Option<String> = None;
+
+            for &(prefix, min_len, aws_upper_only) in token_prefixes {
+                if bytes[i..].starts_with(prefix.as_bytes()) {
+                    let mut end = i + prefix.len();
+                    while end < bytes.len() {
+                        let b = bytes[end];
+                        let valid_char = if aws_upper_only {
+                            b.is_ascii_uppercase() || b.is_ascii_digit()
+                        } else if prefix == "eyJ" {
+                            b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.'
+                        } else {
+                            b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+                        };
+                        if !valid_char {
+                            break;
+                        }
+                        end += 1;
+                    }
+                    let tok = &work[i..end];
+                    let extra_ok = if prefix == "eyJ" {
+                        tok.split('.').count() == 3
+                            && tok.split('.').all(|seg| seg.len() >= 4)
+                    } else {
+                        true
+                    };
+                    if tok.len() >= min_len && extra_ok && !is_placeholder_secret_value(tok) {
+                        matched_len = tok.len();
+                        replacement = Some(if prefix == "eyJ" {
+                            "[REDACTED_JWT]".to_string()
+                        } else {
+                            format!("{}[REDACTED]", prefix)
+                        });
+                    }
+                    break;
+                }
+            }
+
+            if let Some(rep) = replacement {
+                out.push_str(&work[last_copied..i]);
+                out.push_str(&rep);
+                i += matched_len;
+                last_copied = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&work[last_copied..]);
+
+    // Pass 3: Inline credential assignments (`api_key = "..."`, `Bearer <token>`)
+    let lower = out.to_ascii_lowercase();
+    let lb = lower.as_bytes();
+    let mut final_out = String::with_capacity(out.len());
+    let mut j = 0usize;
+    let mut last_j = 0usize;
+    let assign_keys = [
+        "aws_secret_access_key",
+        "client_secret",
+        "secret_key",
+        "access_token",
+        "auth_token",
+        "api_key",
+        "password",
+    ];
+
+    while j < lb.len() {
+        if !lb[j].is_ascii() {
+            let ch = out[j..].chars().next().map_or(1, |c| c.len_utf8());
+            j += ch;
+            continue;
+        }
+        let left_ok = j == 0 || (!lb[j - 1].is_ascii_alphanumeric() && lb[j - 1] != b'_');
+        if left_ok {
+            if lb[j..].starts_with(b"bearer ") {
+                let mut v_start = j + 7;
+                while v_start < lb.len() && lb[v_start] == b' ' {
+                    v_start += 1;
+                }
+                let mut v_end = v_start;
+                while v_end < lb.len()
+                    && !lb[v_end].is_ascii_whitespace()
+                    && !matches!(lb[v_end], b'"' | b'\'' | b',' | b'}')
+                {
+                    v_end += 1;
+                }
+                let val = &out[v_start..v_end];
+                if val.len() >= 16 && !is_placeholder_secret_value(val) {
+                    final_out.push_str(&out[last_j..v_start]);
+                    final_out.push_str("[REDACTED_BEARER]");
+                    j = v_end;
+                    last_j = v_end;
+                    continue;
+                }
+            }
+            let mut masked = false;
+            for &k in &assign_keys {
+                if lb[j..].starts_with(k.as_bytes()) {
+                    let after_k = j + k.len();
+                    let mut p = after_k;
+                    while p < lb.len() && matches!(lb[p], b' ' | b'\t') {
+                        p += 1;
+                    }
+                    if p < lb.len() && matches!(lb[p], b'=' | b':') {
+                        p += 1;
+                        while p < lb.len() && matches!(lb[p], b' ' | b'\t') {
+                            p += 1;
+                        }
+                        let quote = if p < lb.len() && matches!(lb[p], b'"' | b'\'') {
+                            let q = lb[p];
+                            p += 1;
+                            Some(q)
+                        } else {
+                            None
+                        };
+                        let v_start = p;
+                        let mut v_end = v_start;
+                        while v_end < lb.len() {
+                            let b = lb[v_end];
+                            if let Some(q) = quote {
+                                if b == q {
+                                    break;
+                                }
+                            } else if b.is_ascii_whitespace() || matches!(b, b';' | b',' | b'}' | b')') {
+                                break;
+                            }
+                            v_end += 1;
+                        }
+                        if out.is_char_boundary(v_start) && out.is_char_boundary(v_end) {
+                            let val = &out[v_start..v_end];
+                            if val.len() >= 8 && !is_placeholder_secret_value(val) {
+                                final_out.push_str(&out[last_j..v_start]);
+                                final_out.push_str("[REDACTED_SECRET]");
+                                j = v_end;
+                                last_j = v_end;
+                                masked = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if masked {
+                continue;
+            }
+        }
+        j += 1;
+    }
+    final_out.push_str(&out[last_j..]);
+    final_out
+}
+
+/// Redacts sensitive credential literals from telemetry/DPO JSON payloads in place.
+pub fn redact_json_event(val: &mut serde_json::Value) {
+    if let Some(obj) = val.as_object_mut() {
+        for field in &["prompt", "proposal", "challenge", "chosen", "rejected", "response_preview"] {
+            if let Some(serde_json::Value::String(s)) = obj.get_mut(*field) {
+                if !s.is_empty() {
+                    *s = redact_secrets(s);
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -209,15 +507,7 @@ async fn loopback_host_guard(
         .headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
-        .map(|h| {
-            let trimmed = h.trim();
-            if trimmed.starts_with("[::1]") {
-                true
-            } else {
-                let name = trimmed.rsplit_once(':').map(|(n, _)| n).unwrap_or(trimmed);
-                matches!(name, "localhost" | "127.0.0.1")
-            }
-        })
+        .map(is_valid_loopback_host)
         .unwrap_or(false);
     if !host_ok {
         return (StatusCode::FORBIDDEN, "SPINE gateway only serves loopback Host headers").into_response();
@@ -408,11 +698,12 @@ async fn audit_spine_handler(
     let authority_detected = vertebrae.iter().any(|v| v.id == "C6" && v.active);
     let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
 
+    let safe_prompt = redact_secrets(&prompt_text);
     let snapshot = json!({
         "id": next_event_id("evt"),
         "timestamp": now,
         "source": "SPINE Reality Gateway (/api/spine/audit)",
-        "prompt": prompt_text,
+        "prompt": safe_prompt,
         "vertebrae": vertebrae,
         "active_vertebrae_count": active_count,
         "overall_rigidity": overall_rigidity,
@@ -491,6 +782,7 @@ pub fn append_to_telemetry_log(event: &serde_json::Value) {
     // Compact disk serialization: replace 33-element vertebrae description array with active_vertebra_ids
     // and round f32 telemetry metrics to 4 decimal places.
     let mut disk_event = event.clone();
+    redact_json_event(&mut disk_event);
     if let Some(obj) = disk_event.as_object_mut() {
         if let Some(verts) = obj.remove("vertebrae") {
             if let Some(arr) = verts.as_array() {
@@ -592,7 +884,9 @@ pub fn flush_telemetry_logs(timeout: std::time::Duration) {
 /// Appends a verified `(prompt, chosen, rejected)` preference pair to `post_training_pairs.jsonl`
 /// whenever SPINE strips sycophantic cushions or unearned apologies from an assistant response.
 pub fn append_post_training_pair(pair: &serde_json::Value) {
-    if let Ok(json_str) = serde_json::to_string(pair) {
+    let mut sanitized_pair = pair.clone();
+    redact_json_event(&mut sanitized_pair);
+    if let Ok(json_str) = serde_json::to_string(&sanitized_pair) {
         submit_log_job(LogJob::TrainingPair(json_str));
     }
 }
@@ -601,6 +895,7 @@ async fn notify_spine_handler(
     State(state): State<Arc<AppState>>,
     Json(mut payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    redact_json_event(&mut payload);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -688,50 +983,55 @@ async fn history_spine_handler(
 }
 
 async fn logs_spine_handler() -> impl IntoResponse {
-    const TAIL_BYTES: u64 = 256 * 1024;
-    const MAX_LOG_EVENTS: usize = 100;
-    let log_path = telemetry_log_dir().join("telemetry.jsonl");
-    let mut events = Vec::with_capacity(MAX_LOG_EVENTS);
-    if let Ok(mut file) = std::fs::File::open(&log_path) {
-        use std::io::{Read, Seek, SeekFrom};
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let start = len.saturating_sub(TAIL_BYTES);
-        if file.seek(SeekFrom::Start(start)).is_ok() {
-            let mut buf = Vec::new();
-            if file.read_to_end(&mut buf).is_ok() {
-                let text = String::from_utf8_lossy(&buf);
-                let mut lines: Vec<&str> = text.lines().collect();
-                if start > 0 && !lines.is_empty() {
-                    lines.remove(0); // first line is likely partial
-                }
-                for line in lines.into_iter().rev() {
-                    if events.len() >= MAX_LOG_EVENTS {
-                        break;
+    let events = tokio::task::spawn_blocking(move || {
+        const TAIL_BYTES: u64 = 256 * 1024;
+        const MAX_LOG_EVENTS: usize = 100;
+        let log_path = telemetry_log_dir().join("telemetry.jsonl");
+        let mut events = Vec::with_capacity(MAX_LOG_EVENTS);
+        if let Ok(mut file) = std::fs::File::open(&log_path) {
+            use std::io::{Read, Seek, SeekFrom};
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let start = len.saturating_sub(TAIL_BYTES);
+            if file.seek(SeekFrom::Start(start)).is_ok() {
+                let mut buf = Vec::new();
+                if file.read_to_end(&mut buf).is_ok() {
+                    let text = String::from_utf8_lossy(&buf);
+                    let mut lines: Vec<&str> = text.lines().collect();
+                    if start > 0 && !lines.is_empty() {
+                        lines.remove(0); // first line is likely partial
                     }
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            if let Some(obj) = val.as_object_mut() {
-                                if let Some(verts) = obj.remove("vertebrae") {
-                                    if !obj.contains_key("active_vertebra_ids") {
-                                        if let Some(arr) = verts.as_array() {
-                                            let active_ids: Vec<String> = arr
-                                                .iter()
-                                                .filter(|v| v.get("active").and_then(|a| a.as_bool()).unwrap_or(false))
-                                                .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
-                                                .collect();
-                                            obj.insert("active_vertebra_ids".to_string(), json!(active_ids));
+                    for line in lines.into_iter().rev() {
+                        if events.len() >= MAX_LOG_EVENTS {
+                            break;
+                        }
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                                if let Some(obj) = val.as_object_mut() {
+                                    if let Some(verts) = obj.remove("vertebrae") {
+                                        if !obj.contains_key("active_vertebra_ids") {
+                                            if let Some(arr) = verts.as_array() {
+                                                let active_ids: Vec<String> = arr
+                                                    .iter()
+                                                    .filter(|v| v.get("active").and_then(|a| a.as_bool()).unwrap_or(false))
+                                                    .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+                                                    .collect();
+                                                obj.insert("active_vertebra_ids".to_string(), json!(active_ids));
+                                            }
                                         }
                                     }
                                 }
+                                events.push(val);
                             }
-                            events.push(val);
                         }
                     }
                 }
             }
         }
-    }
+        events
+    })
+    .await
+    .unwrap_or_default();
     Json(json!({
         "events": events,
         "count": events.len()
@@ -893,6 +1193,7 @@ async fn chat_completions_handler(
     let flattery_detected = vertebrae.iter().any(|v| v.id == "C4" && v.active);
     let authority_detected = vertebrae.iter().any(|v| v.id == "C6" && v.active);
     let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
+    let safe_prompt_text = redact_secrets(&prompt_text);
     let event_obj = json!({
         "id": next_event_id("evt"),
         "source": "SPINE Gateway (/v1/chat/completions)",
@@ -902,7 +1203,7 @@ async fn chat_completions_handler(
         "overall_rigidity": overall_rigidity,
         "reality_level": reality_level as u8,
         "model": model_id,
-        "prompt": prompt_text,
+        "prompt": safe_prompt_text,
         "timestamp": now_ts,
         "ego_detected": ego_detected,
         "flattery_detected": flattery_detected,
@@ -1443,7 +1744,8 @@ async fn chat_completions_handler(
                         }
                     }
                     Err(e) => {
-                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(format!("{{\"error\": \"{}\"}}", e)));
+                        let err_json = json!({ "error": e.to_string() }).to_string();
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(err_json));
                     }
                 }
             }
@@ -1708,25 +2010,27 @@ async fn attest_spine_handler(
 #[derive(serde::Deserialize)]
 pub struct VerifyAttestationRequest {
     pub attestation: vertebrae::SpineGateAttestation,
+    #[serde(default)]
+    #[allow(dead_code)]
     pub secret_key: Option<String>,
 }
 
 async fn verify_attestation_spine_handler(
     Json(payload): Json<VerifyAttestationRequest>,
 ) -> impl IntoResponse {
-    let key_override = payload.secret_key.as_deref();
-    let valid = if key_override.is_some() {
-        AdversarialAuditEngine::verify_gate_attestation(&payload.attestation, key_override)
-    } else {
-        let env_key = std::env::var("SPINE_ATTESTATION_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty())
-            .unwrap_or_else(|| "spine-local-dev-attestation-key-2026".to_string());
-        AdversarialAuditEngine::verify_gate_attestation(&payload.attestation, Some(&env_key))
-    };
+    // Reject untrusted caller key overrides and hardcoded fallback keys;
+    // verify strictly against SPINE_ATTESTATION_KEY from server environment.
+    let env_key = std::env::var("SPINE_ATTESTATION_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    let valid = AdversarialAuditEngine::verify_gate_attestation(
+        &payload.attestation,
+        env_key.as_deref(),
+    );
     Json(json!({
         "status": "success",
         "valid": valid,
+        "key_configured": env_key.is_some(),
         "attestation_id": payload.attestation.attestation_id,
         "verdict": payload.attestation.verdict,
     }))
@@ -1896,7 +2200,36 @@ mod streaming_order_tests {
     #[test]
     fn loopback_normalization_avoids_ipv6_fallback() {
         assert_eq!(mcp::normalize_loopback_base("http://localhost:8080/"), "http://127.0.0.1:8080");
+        assert_eq!(mcp::normalize_loopback_base("http://localhost"), "http://127.0.0.1");
         assert_eq!(mcp::normalize_loopback_base("http://[::1]:3030"), "http://127.0.0.1:3030");
         assert_eq!(mcp::normalize_loopback_base("https://api.example.com"), "https://api.example.com");
+    }
+
+    #[test]
+    fn host_guard_and_secret_redaction_v142() {
+        assert!(is_valid_loopback_host("localhost"));
+        assert!(is_valid_loopback_host("localhost:8080"));
+        assert!(is_valid_loopback_host("127.0.0.1:8080"));
+        assert!(is_valid_loopback_host("[::1]"));
+        assert!(is_valid_loopback_host("[::1]:8080"));
+        assert!(!is_valid_loopback_host("[::1].evil.com"));
+        assert!(!is_valid_loopback_host("localhost:evil"));
+        assert!(!is_valid_loopback_host("localhost:80@evil.com"));
+        assert!(!is_valid_loopback_host("evil.com"));
+
+        let aws_tok = concat!("AK", "IA4R7X9Q2M8N5P3L1K");
+        let oai_tok = concat!("sk-", "proj-CanarySecretKey1234567890ABCDEFGH");
+        let gh_tok = concat!("gh", "p_CanarySecretToken1234567890abcdefghij");
+        let pat_tok = concat!("github_", "pat_11ABCDEFG0123456789_abcdefghijklmnopqr");
+        let sample = format!(
+            "AWS={} OAI={} GH={} PAT={} PLACEHOLDER=YOUR_API_KEY_HERE_REPLACE_ME",
+            aws_tok, oai_tok, gh_tok, pat_tok
+        );
+        let redacted = redact_secrets(&sample);
+        assert!(!redacted.contains(aws_tok));
+        assert!(!redacted.contains(oai_tok));
+        assert!(!redacted.contains(gh_tok));
+        assert!(!redacted.contains(pat_tok));
+        assert!(redacted.contains("YOUR_API_KEY_HERE_REPLACE_ME"));
     }
 }

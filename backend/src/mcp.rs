@@ -79,10 +79,18 @@ const MAX_MCP_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// IPv6 connect-refused round trip (and SYN retries) before falling back to IPv4.
 pub fn normalize_loopback_base(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
-    trimmed
+    let replaced = trimmed
         .replacen("://localhost:", "://127.0.0.1:", 1)
         .replacen("://localhost/", "://127.0.0.1/", 1)
         .replacen("://[::1]:", "://127.0.0.1:", 1)
+        .replacen("://[::1]/", "://127.0.0.1/", 1);
+    if replaced.ends_with("://localhost") {
+        replaced.replacen("://localhost", "://127.0.0.1", 1)
+    } else if replaced.ends_with("://[::1]") {
+        replaced.replacen("://[::1]", "://127.0.0.1", 1)
+    } else {
+        replaced
+    }
 }
 
 /// Fire-and-forget HUD telemetry broadcast. Tool responses never wait on the HUD gateway,
@@ -128,6 +136,7 @@ pub async fn run_stdio_server(api_key: String) {
     });
 
     let mut in_flight = tokio::task::JoinSet::new();
+    let concurrency_limit = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
 
     loop {
         buf.clear();
@@ -177,10 +186,14 @@ pub async fn run_stdio_server(api_key: String) {
         // Reap finished tasks so the JoinSet does not grow over a long IDE session.
         while in_flight.try_join_next().is_some() {}
 
+        let Ok(permit) = concurrency_limit.clone().acquire_owned().await else {
+            break;
+        };
         let client = http_client.clone();
         let key = api_key.clone();
         let tx = out_tx.clone();
         in_flight.spawn(async move {
+            let _permit = permit;
             if let Some(resp) = handle_rpc(&client, &key, req).await {
                 if let Ok(out) = serde_json::to_string(&resp) {
                     let _ = tx.send(out);
@@ -358,6 +371,7 @@ async fn handle_rpc(
                     let pushback_detected = vertebrae.iter().any(|v| v.id == "T4" && v.active);
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let safe_prompt = crate::redact_secrets(prompt);
                     let audit_payload = json!({
                         "id": crate::next_event_id("evt"),
                         "timestamp": now_ts,
@@ -366,7 +380,7 @@ async fn handle_rpc(
                         "vertebrae": vertebrae,
                         "active_vertebrae_count": active_count,
                         "overall_rigidity": overall_rigidity,
-                        "prompt": prompt,
+                        "prompt": safe_prompt,
                         "persisted": true,
                         "reality_level": lvl,
                         "flattery_detected": flattery_detected,
@@ -452,12 +466,13 @@ async fn handle_rpc(
                     );
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let safe_challenge = crate::redact_secrets(challenge);
                     let pb_payload = json!({
                         "id": crate::next_event_id("evt"),
                         "timestamp": now_ts,
                         "source": "Antigravity / Cursor IDE (MCP Tool)",
                         "tool": "spine_verify_pushback",
-                        "prompt": challenge,
+                        "prompt": safe_challenge,
                         "persisted": true,
                         "reality_level": lvl,
                         "authority_detected": analysis.has_authority_intimidation,
@@ -518,13 +533,14 @@ async fn handle_rpc(
                     );
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let safe_proposal = crate::redact_secrets(proposal);
                     let rt_payload = json!({
                         "id": crate::next_event_id("evt_rt"),
                         "timestamp": now_ts,
                         "source": "Antigravity / Cursor IDE (MCP Tool)",
                         "tool": "spine_adversarial_redteam",
                         "target": target_name,
-                        "prompt": proposal,
+                        "prompt": safe_proposal,
                         "persisted": true,
                         "reality_level": lvl,
                         "verdict": report.verdict,
@@ -559,13 +575,14 @@ async fn handle_rpc(
                     let attestation = crate::vertebrae::AdversarialAuditEngine::generate_gate_attestation(&report, proposal);
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let safe_proposal = crate::redact_secrets(proposal);
                     let att_payload = json!({
                         "id": crate::next_event_id("evt_attest"),
                         "timestamp": now_ts,
                         "source": "Antigravity / Cursor IDE (MCP Tool)",
                         "tool": "spine_generate_gate_attestation",
                         "target": target_name,
-                        "prompt": proposal,
+                        "prompt": safe_proposal,
                         "persisted": true,
                         "reality_level": lvl,
                         "attestation_id": attestation.attestation_id,
@@ -811,6 +828,8 @@ async fn handle_rpc(
                     }
 
                     let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let safe_prompt = crate::redact_secrets(prompt);
+                    let safe_preview = crate::redact_secrets(&resp_text.chars().take(200).collect::<String>());
                     let exec_payload = json!({
                         "id": crate::next_event_id("evt_exec"),
                         "timestamp": now_ts,
@@ -819,11 +838,11 @@ async fn handle_rpc(
                         "vertebrae": vertebrae,
                         "active_vertebrae_count": active_count,
                         "overall_rigidity": overall_rigidity,
-                        "prompt": prompt,
+                        "prompt": safe_prompt,
                         "persisted": true,
                         "model": model,
                         "reality_level": lvl,
-                        "response_preview": resp_text.chars().take(200).collect::<String>()
+                        "response_preview": safe_preview
                     });
                     crate::append_to_telemetry_log(&exec_payload);
                     spawn_hud_notify(client, gateway_base, exec_payload);
